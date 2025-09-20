@@ -1,0 +1,1 @@
+t the start of each player’s Command phase, this model regains up to D3 lost wounds.

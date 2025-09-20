@@ -1,0 +1,158 @@
+%import common.WS
+%import common.NUMBER
+%import common.DIGIT
+%ignore WS
+
+// punctuation
+DOT: "."
+STAR: "*"
+COMMA: ","
+
+// number words (handled later in a Transformer)
+WORDNUM: /(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion)/i
+
+stratagem: "rapid ingress"i -> rapid_ingress 
+         | "heroic intervention"i -> heroic_intervention 
+         | "fire overwatch"i -> fire_overwatch
+
+characteristic: "leadership"i -> leadership
+
+unit_name: "ripper swarms"i -> ripper_swarms
+         | "spore mines"i -> spore_mines
+         | "mucolid spores"i -> mucolid_spores 
+
+range_number: raw_number "+"            -> range_number_greater
+            | raw_number "-" raw_number -> range_number_range
+            | raw_number                -> range_number_exact
+
+// ----- rolls -----
+roll_kind: "hit"i -> hit_roll 
+         | "wound"i -> wound_roll
+         | "advance"i -> advance_roll
+         | "charge"i -> charge_roll
+
+model_keyword: "character"i -> character_keyword
+             | "infantry"i -> infantry_keyword 
+             | "tyranids"i -> tyranid_keyword
+             | "termagants"i -> termagants_keyword
+             | "psyker"i -> psyker_keyword 
+             | "neurogaunt"i -> neurogaunt_keyword
+             | "synapse"i -> synapse_keyword
+             | "titanic"i -> titanic_keyword
+             | "monsters"i -> monster_keyword 
+
+battle_round_index: "first" -> first_battle_round
+
+phase_instant: "fight phase"i -> fighting_phase
+             | "movement phase"i -> movement_phase
+             | "shooting phase"i -> shooting_phase 
+             | "command"i "phase"i -> command_phase 
+             | "phase"i -> current_phase 
+
+step_instant: "battle-shock"i "step"i -> battle_shock_step 
+
+raw_number: DIGIT+ -> number
+
+// ----- quantities -----
+quantity: raw_number -> raw_number_outer
+        | word_quantity -> word_number
+        | [word_quantity] "D" quantity ["+"i quantity] -> dice_value 
+        | "the result"i                  -> dice_result
+
+// e.g. "twenty", "twenty one", "one hundred and twenty-three"
+word_quantity: WORDNUM ( [ "-" ] WORDNUM | "and"i WORDNUM )*
+
+
+weapon_name: "barbed ovipositor"i -> barbed_ovopositor 
+
+status_afflicted: "disrupted" -> status_disrupted
+
+special_rule_subjects: "a subterranean tunnel"i -> subterranean_tunnel
+
+weapon_qualifier: "ranged"i  -> ranged_weapon 
+                | "melee"i -> melee_weapon
+
+
+weapon_ability: "[devastating"i "wounds]"i -> devastating_wounds 
+              | "[lethal"i "hits]"i -> letal_hits 
+              | "[assault]"i -> assault
+              | "[sustained hits"i quantity "]"i -> sustained_hits 
+
+weapon_characteristic: "attacks"i            -> weapon_attacks
+                     | "armour penetration"i -> armour_penetration
+                     | "damage"i             -> damage_weapon_characteristic 
+
+// entry
+start: effect_seq 
+
+effect_seq: effect (DOT effect)* DOT
+effect: single_effect ("and" single_effect)* 
+
+single_effect: conditional_effect
+             | timed_effect
+             | additional_effect
+             | temporary_effect
+             | imperative_rule
+             | select_effect
+
+additional_effect: "in addition,"i effect   -> additional_effect
+
+temporary_effect: "until"i time_condition "," effect -> until_effect
+
+select_effect: "select one"i subject -> select_subject
+
+timed_effect: "at"i time_condition ","i effect    -> at_event
+            | "each time"i event ","i effect      -> each_time
+            | "in"i time_condition "," effect     -> at_event 
+
+event: subject "makes an attack"  -> makes_an_attack
+     | subject "destroys" subject -> destroys
+
+time_condition: "the"i time_qualifier "of the" phase_instant
+              | "the"i step_instant "of your opponent’s"i phase_instant -> oppo_step_condition
+
+
+time_qualifier: "start"i -> time_start
+              | "end"i   -> time_end
+
+conditional_effect: "while"i boolean_expression ","i effect -> while_true_effect
+                  | "if"i boolean_expression ","i effect    -> if_effect 
+
+imperative_rule: [weapon_qualifier] "weapons equipped by"i subject "have the"i weapon_ability "ability" -> obtain_weapon_ability
+               | "subtract"i quantity "from the"i roll_kind "roll" -> subtract_effect
+               | "you gain"i quantity "cp"i -> gain_cps 
+               | "worsen the"i characteristic "characteristic of"i subject "by"i quantity -> worsen_characteristic
+               | subject "must take a battle-shock test"i -> generate_battle_shock_test
+
+boolean_expression: subject "is"i is_constraint
+
+subject: subject constraint          -> constrained_subject
+       | forward_constraint subject  -> forward_constrained_subject
+       | "this"i subject_type        -> this_model
+       | base_subject           
+       | "a"i subject
+       | "an"i subject
+
+
+base_subject: subject_type                              -> any
+            | "that"i subject_type                      -> such_subject_type
+            | "such" subject                            -> such_subject 
+            | subject_type "in" subject                 -> in_subject 
+            | "it"i                                     -> it_subject
+
+subject_type: "unit"i                           -> unit
+            | "model"i                          -> model
+            | "models"i                         -> model
+
+forward_constraint: "enemy"i                -> enemy 
+                  | "allied"i               -> allied 
+                  | model_keyword           -> keyworded_constraint
+
+constraint: is_constraint
+
+is_constraint: "within"i quantity "\" of" subject         -> within_constraint 
+             | "leading" subject                          -> leading_constraint
+             | "below its starting strength"i             -> below_its_starting_strenght 
+             | "within engagement range of"i subject      -> within_engagement_range
+             | "in" subject                               -> subject_in_subject
+

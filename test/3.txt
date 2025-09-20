@@ -1,0 +1,1 @@
+Each time this model destroys an enemy CHARACTER model, you gain 1CP.

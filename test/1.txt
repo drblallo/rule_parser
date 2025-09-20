@@ -1,0 +1,1 @@
+While this model is leading a unit, weapons equipped by models in that unit have the [DEVASTATING WOUNDS] ability.
