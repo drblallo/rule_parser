@@ -1,7 +1,23 @@
+from .dialect import *
+from .rlc_serialize import *
+from .passes import *
+from .semantic_analizer import *
+from .to_ast import *
 import argparse
-import traceback
-import sys
-from rule_parser import *
+
+def get_arg_parser():
+    ap = argparse.ArgumentParser(
+        description="Parse game rules and turns them into rulebook code."
+                    "Pass '-' to read from stdin.")
+    ap.add_argument("path", help="path to dump file or '-' for stdin", default="-", nargs="?")
+    ap.add_argument("-o", help="output", default="-", nargs="?")
+    ap.add_argument("--unchecked", action='store_true', default=False)
+    ap.add_argument("--type-checked", action='store_true', default=False)
+    ap.add_argument("--canonicalized", action='store_true', default=False)
+    ap.add_argument("--before-printing", action='store_true', default=False)
+    ap.add_argument("--after-inline", action='store_true', default=False)
+    ap.add_argument("--verify", action='store_true', default=False)
+    return ap
 
 def parse(text):
     with open("./40k.lark", encoding="utf-8") as f:
@@ -51,34 +67,10 @@ def run_pipeline(ast: ModuleOp, args, out):
     ctx = Context()
     pm.apply(ctx, ast)
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Parse game rules and turns them into rulebook code."
-                    "Pass '-' to read from stdin.")
-    ap.add_argument("path", help="path to dump file or '-' for stdin", default="-", nargs="?")
-    ap.add_argument("-o", help="output", default="-", nargs="?")
-    ap.add_argument("--unchecked", action='store_true', default=False)
-    ap.add_argument("--type-checked", action='store_true', default=False)
-    ap.add_argument("--canonicalized", action='store_true', default=False)
-    ap.add_argument("--before-printing", action='store_true', default=False)
-    ap.add_argument("--after-inline", action='store_true', default=False)
-    ap.add_argument("--verify", action='store_true', default=False)
-    args = ap.parse_args()
-
-    content = sys.stdin if args.path == "-" else open(args.path, encoding="utf-8")
-    out = sys.stdout if args.o == "-" else open(args.o, "w+")
-
+def run_on_file(file_path: str, out):
+    content = open(file_path, encoding="utf-8")
     ast = parse("".join(content.readlines()))
-
-    printer = Printer(out)
-    try:
-        run_pipeline(ast, args, out)
-    except Exception:
-        print(traceback.format_exc())
-        print(ast)
-    if args.verify:
-        ast.verify()
-
-
-if __name__ == "__main__":
-    main()
+    ap = get_arg_parser()
+    fake_args = ap.parse_args([""])
+    run_pipeline(ast, fake_args, out)
+    return ast
