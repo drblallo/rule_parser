@@ -1,7 +1,7 @@
 from .dialect import *
 from functools import singledispatchmethod
 from .passes import dominates
-from .passes import merge_preconditions
+from .passes import merge_preconditions, move_region_content
 
 class SemanticalAnalyzer(ModulePass):
     name = "semantical-analyze-pass"
@@ -31,6 +31,10 @@ class SemanticalAnalyzer(ModulePass):
         raise NotImplementedError()
 
     @_visit.register
+    def _(self, op: WithinRange):
+        pass
+
+    @_visit.register
     def _(self, op: Any):
         pass
 
@@ -58,7 +62,6 @@ class SemanticalAnalyzer(ModulePass):
 
     @_visit.register
     def _(self, cond: IsSame):
-        print(cond)
         assert(cond.lhs.type == cond.rhs.type)
         pass
 
@@ -131,9 +134,9 @@ class SemanticalAnalyzer(ModulePass):
         self.rewriter.erase_op(filter.base_subject.first_block.last_op)
         self.rewriter.inline_block(filter.base_subject.first_block, InsertPoint.before(block.last_op))
 
-        is_same = IsSame.make(block.args[0], base_subject)
-        self.rewriter.insert_op(is_same, InsertPoint.before(block.last_op))
-        and_op = And.make(is_same.result, block.last_op.value)
+        belongs_to = BelongsTo.make(block.args[0], base_subject)
+        self.rewriter.insert_op(belongs_to, InsertPoint.before(block.last_op))
+        and_op = And.make(belongs_to.result, block.last_op.value)
         self.rewriter.insert_op(and_op, InsertPoint.before(block.last_op))
         block.last_op.operands[0] = and_op.result
 
@@ -147,8 +150,12 @@ class SemanticalAnalyzer(ModulePass):
 
         self.rewriter.replace_value_with_new_type(cond.result, cond.get_belongs_to_argument_type().underlying)
         self._rewrite_any_matching_subject_as_filter(cond)
-        self.seen_subjects.append(cond.result)
 
+    @_visit.register
+    def _(self, cond: MakeReferrable):
+        if not isinstance(cond.subject, SuchSubject):
+            self.seen_subjects.append(cond.subject)
+        self.rewriter.erase_op(cond)
 
     @_visit.register
     def _(self, cond: TimedEffect):
@@ -166,13 +173,19 @@ class SemanticalAnalyzer(ModulePass):
             self.visit(op)
 
     @_visit.register
+    def _(self, cond: ModifyCharacteristic):
+        for op in list(cond.beneficient.ops):
+            self.visit(op)
+        for op in list(cond.condition.ops):
+            self.visit(op)
+
+    @_visit.register
     def _(self, cond: ThisSubject):
         pass
 
     @_visit.register
     def _(self, cond: Leading):
-        self.seen_subjects.append(cond.leader)
-        self.seen_subjects.append(cond.unit)
+        pass
 
     @_visit.register
     def _(self, cond: ObtainWeaponAbility):
@@ -200,14 +213,33 @@ class SemanticalAnalyzer(ModulePass):
             self.rewriter.erase_op(ref)
 
             return
+        for op in self.seen_subjects:
+            print(op.owner)
+        print(ref)
         raise NotImplementedError()
+
+
+    @_visit.register
+    def _(self, ref: OneOf):
+        for op in list(ref.base_subject.ops):
+            self.visit(op)
+        yield_op = ref.base_subject.first_block.last_op
+        new_type = yield_op.value.type
+        if not isinstance(new_type, ListType) or isinstance(ref.parent_op(), AnyMatchingSubject):
+            ref.result.replace_by(yield_op.value)
+            self.rewriter.inline_block(ref.base_subject.last_block, InsertPoint.before(ref))
+            self.rewriter.erase_op(yield_op)
+            self.rewriter.erase_op(ref)
+            return
+
+        self.rewriter.replace_value_with_new_type(ref.result, new_type.underlying)
 
     @_visit.register
     def _(self, ref: AnyMatchingSubject):
         for op in list(ref.base_subject.ops):
             self.visit(op)
         new_type = ref.base_subject.first_block.last_op.value.type
-        result_type = new_type if isinstance(new_type, ListType) else ListType.make(new_type)
+        result_type = new_type
         base_type = new_type.underlying if isinstance(new_type, ListType) else new_type
         self.rewriter.replace_value_with_new_type(ref.result, result_type)
         self.rewriter.replace_value_with_new_type(ref.constraint.first_block.args[0], base_type)

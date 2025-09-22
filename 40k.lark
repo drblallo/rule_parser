@@ -130,8 +130,8 @@ subject: subject constraint          -> constrained_subject
        | forward_constraint subject  -> forward_constrained_subject
        | "this"i subject_type        -> this_model
        | base_subject           
-       | "a"i subject
-       | "an"i subject
+       | "a"i subject                -> singular_subject 
+       | "an"i subject               -> singular_subject
 
 
 base_subject: subject_type                              -> any

@@ -12,6 +12,7 @@ from xdsl.dialects.builtin import ModuleOp, StringAttr, IntAttr, AnyOf, AttrCons
 from xdsl.irdl import irdl_op_definition, OpResult, Operand, IRDLOperation, result_def, irdl_attr_definition, attr_constr_coercion, Data, attr_def, operand_def, region_def, BaseAttr, OpTraits, traits_def, ParamDef, opt_operand_def, opt_result_def, var_operand_def
 from enum import Enum, StrEnum, auto
 
+
 class TargetingTypeInterface(ABC):
     pass
 
@@ -111,20 +112,7 @@ class Any(IRDLOperation):
 
     @classmethod
     def make(cls, type):
-        return cls.build(result_types=[type])
-
-@irdl_op_definition
-class All(IRDLOperation):
-    name = "rul.all"
-    result: OpResult = result_def()
-
-    traits: OpTraits = traits_def(Pure())
-    assembly_format = "attr-dict `->` type($result)"
-
-    @classmethod
-    def make(cls, type):
         return cls.build(result_types=[ListType.make(type)])
-
 
 
 @irdl_op_definition
@@ -346,17 +334,34 @@ class RollKindAttr(EnumAttribute[RollKind]):
     name = "rul.roll_kind"
 
 @irdl_op_definition
-class ModifyCharacteristic(IRDLOperation):
-    name = "rul.modify_characteristic"
-    to_modify: Operand = operand_def(ModelType)
+class GiveCharacteristicModifier(IRDLOperation):
+    name = "rul.give_characteristic_modifier"
     characteristic: Attribute = attr_def(CharacteristicAttr)
     quantity: Attribute = attr_def(IntAttr)
+    beneficient: Operand = operand_def(ModelType)
+    traits: OpTraits = traits_def(HasPreconditions())
 
-    assembly_format = "$to_modify $characteristic $quantity attr-dict `:` type($to_modify)"
+    assembly_format = "$characteristic $quantity $beneficient attr-dict `:` type($beneficient)"
 
     @classmethod
-    def make(cls, to_modify: SSAValue, characteristic: Characteristic, quantity: int) -> 'ModifyRoll':
-        to_return = cls.build(attributes={"characteristic": Characteristic(characteristic), 'quantity': IntAttr(quantity)}, operands=[to_modify])
+    def make(cls, beneficient: SSAValue, characteristic: Characteristic, quantity: int) -> 'GiveCharacteristicModifier':
+        to_return = cls.build(attributes={"characteristic": characteristic, 'quantity': quantity}, operands=[beneficient])
+        return to_return
+
+@irdl_op_definition
+class ModifyCharacteristic(IRDLOperation):
+    name = "rul.modify_characteristic"
+    characteristic: Attribute = attr_def(CharacteristicAttr)
+    quantity: Attribute = attr_def(IntAttr)
+    condition = region_def()
+    beneficient = region_def()
+    traits: OpTraits = traits_def(HasPreconditions())
+
+    assembly_format = "$characteristic $quantity $condition $beneficient attr-dict"
+
+    @classmethod
+    def make(cls, characteristic: Characteristic, quantity: int) -> 'ModifyRoll':
+        to_return = cls.build(attributes={"characteristic": CharacteristicAttr(characteristic), 'quantity': IntAttr(quantity)}, regions=[Region(Block()), Region(Block())])
         return to_return
 
 @irdl_op_definition
@@ -421,6 +426,17 @@ class SelectSubject(IRDLOperation, FilteringOp):
         to_return.condition.first_block.args[0].name_hint = "selection"
         return to_return
 
+
+@irdl_op_definition
+class MakeReferrable(IRDLOperation):
+    name = "rul.make_referrable"
+    subject: Operand = operand_def()
+
+    @classmethod
+    def make(cls, unit: SSAValue):
+        return cls.build(operands=[unit])
+
+    assembly_format = "$subject attr-dict `:` type($subject) "
 
 @irdl_op_definition
 class BelowStartingStrenght(IRDLOperation):
@@ -814,6 +830,21 @@ class DestroyedSubject(IRDLOperation):
         return cls.build(result_types=[UnknownType()], regions=[Region(Block())])
 
 @irdl_op_definition
+class OneOf(IRDLOperation):
+    name = "rul.one_of"
+
+    base_subject: Region = region_def()
+    result: OpResult = result_def()
+    traits: OpTraits = traits_def(RecursivelySpeculatable())
+
+    assembly_format = "$base_subject attr-dict `->` type($result)"
+
+    @classmethod
+    def make(cls, base_type: Attribute) -> 'OneOf':
+        return cls.build(result_types=[base_type], regions=[Region(Block())])
+
+
+@irdl_op_definition
 class AnyMatchingSubject(IRDLOperation):
     name = "rul.any_matching_subject"
 
@@ -949,6 +980,22 @@ class AdditionalEffect(IRDLOperation):
     @classmethod
     def make(cls) -> 'AdditionalEffect':
         return cls.build(regions=[Region(Block())])
+
+@irdl_op_definition
+class ForAllStatement(IRDLOperation):
+    name = "rul.for_all_statement"
+    iterable: Operand = operand_def(ListType)
+    body: Region = region_def()
+    traits: OpTraits = traits_def(RecursivelySpeculatable())
+
+    assembly_format = "$iterable $body attr-dict `:` type($iterable)"
+
+    @classmethod
+    def make(cls, operand: SSAValue) -> 'ForAllStatement':
+        to_return = cls.build(regions=[Region(Block())], operands=[operand])
+        to_return.body.first_block.insert_arg(operand.type.underlying, 0)
+        return to_return
+
 
 @irdl_op_definition
 class IfStatement(IRDLOperation):

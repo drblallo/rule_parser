@@ -1,6 +1,29 @@
 from .dialect import *
 from typing import List
 from functools import singledispatchmethod
+def move_region_content(dest: Region, src: Region):
+    for block in list(dest.blocks):
+        dest.erase_block(block)
+    for block in list(src.blocks):
+        src.detach_block(block)
+        dest.add_block(block)
+
+def move_all_ops(src: Block, dst: Block) -> None:
+    # snapshot because we'll mutate src
+    ops = list(src.ops)
+
+    # detach every op from the source (keeps SSA uses intact)
+    for op in ops:
+        src.detach_op(op)
+
+    # append to destination, preserving order
+    if dst.is_empty:
+        dst.add_ops(ops)
+    else:
+        # append after the current last op (instead of add_ops which would error
+        # if last op is considered a terminator in that context)
+        dst.insert_ops_after(ops, dst.last_op)
+
 
 def dominates(dominator: Operation, dominatee: Operation):
     must_contain = dominator.parent_op()
@@ -141,6 +164,24 @@ class RewriteEventsPass(ModulePass):
             rewriter.erase_op(op)
             rewriter.insert_op(GiveWeaponAbility.make(func.body.first_block.args[3], op.ability, op.qualifier), InsertPoint.at_start(true_branch))
 
+        for op in visit(module, ModifyCharacteristic):
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.condition], RLCFunction.make_event("on_evaluate_characteristic"))
+            condition_value1 = cond.last_op.value
+            rewriter.erase_op(cond.last_op)
+
+            acceptable_models = op.beneficient.first_block.last_op.value
+            rewriter.erase_op(op.beneficient.first_block.last_op)
+            rewriter.inline_block(op.beneficient.first_block, InsertPoint.at_end(cond))
+
+            belongs_to = BelongsTo.make(func.body.first_block.args[3], acceptable_models)
+            rewriter.insert_op(belongs_to, InsertPoint.after(cond.last_op))
+            and_op = And.make(condition_value1, belongs_to.result)
+            rewriter.insert_op(and_op, InsertPoint.after(cond.last_op))
+            rewriter.insert_op(Yield.make(and_op), InsertPoint.after(cond.last_op))
+
+            rewriter.erase_op(op)
+            rewriter.insert_op(GiveCharacteristicModifier.make(func.body.first_block.args[3], op.characteristic, op.quantity), InsertPoint.at_start(true_branch))
+
         for op in visit(module, TimedEffect):
             op: TimedEffect
             (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.condition], RLCFunction.make_time_event(op.event_name()))
@@ -192,10 +233,71 @@ class DropUselessOperations(ModulePass):
         rewriter = Rewriter()
         for op in visit(module, IsSame):
             op: IsSame
-            if isinstance(op.lhs.owner, Any) or isinstance(op.rhs.owner, Any):
-                true_op = TrueOp.make()
-                rewriter.insert_op(true_op, InsertPoint.before(op))
-                op.result.replace_by(true_op.result)
+            if isinstance(op.rhs.owner, OneOf) and op.rhs.uses.get_length() == 1:
+                any_of: OneOf
+                any_of = op.rhs.owner
+                subject_list = any_of.base_subject.first_block.last_op.value
+                rewriter.erase_op(any_of.base_subject.first_block.last_op)
+                rewriter.inline_block(any_of.base_subject.first_block, InsertPoint.before(any_of))
+                belongs_to = BelongsTo.make(op.lhs, subject_list)
+                rewriter.insert_op(belongs_to, InsertPoint.before(op))
+                op.result.replace_by(belongs_to.result)
+                rewriter.erase_op(op)
+                rewriter.erase_op(any_of)
+
+            if isinstance(op.lhs.owner, OneOf) and op.lhs.uses.get_length() == 1:
+                any_of: OneOf
+                any_of = op.lhs.owner
+                subject_list = any_of.base_subject.first_block.last_op.value
+                rewriter.erase_op(any_of.base_subject.first_block.last_op)
+                rewriter.inline_block(any_of.base_subject.first_block, InsertPoint.before(any_of))
+                belongs_to = BelongsTo.make(op.rhs, subject_list)
+                rewriter.insert_op(belongs_to, InsertPoint.before(op))
+                op.result.replace_by(belongs_to.result)
+                rewriter.erase_op(op)
+                rewriter.erase_op(any_of)
+
+        for op in visit(module, BelongsTo):
+            unit = op.rhs.owner
+            if isinstance(unit, Any):
+                if unit.result.uses.get_length() == 1:
+                   true_op = TrueOp.make()
+                   op.result.replace_by(true_op.result)
+                   rewriter.insert_op(true_op, InsertPoint.before(op))
+                   rewriter.erase_op(op)
+                   rewriter.erase_op(unit)
+
+        for op in visit(module, BelongsTo):
+            unit = op.rhs.owner
+            if isinstance(unit, SubjectsIn):
+                if unit.result.uses.get_length() == 1:
+                   unit.result.replace_by(unit.unit)
+                   rewriter.erase_op(unit)
+
+        for op in visit(module, BelongsTo):
+            unit = op.rhs.owner
+            unit: AnyMatchingSubject
+            if isinstance(unit, AnyMatchingSubject) and isinstance(unit.single_base_subject(), Any):
+                if unit.result.uses.get_length() != 1:
+                    continue
+
+                unit.constraint.first_block.args[0].replace_by(op.model)
+                op.result.replace_by(unit.constraint.first_block.last_op.value)
+                rewriter.erase_op(unit.constraint.first_block.last_op)
+                rewriter.inline_block(unit.constraint.first_block, InsertPoint.before(op))
+                rewriter.erase_op(op)
+                rewriter.erase_op(unit)
+
+        for op in visit(module, IfStatement):
+            op: IfStatement
+            if len(op.condition.first_block.ops) != 2:
+                continue
+            yield_op = op.condition.first_block.last_op
+            if yield_op.value.owner != op.condition.first_block.first_op:
+                continue
+            if isinstance(yield_op.value.owner, TrueOp):
+                rewriter.erase_op(op.true_branch.first_block.last_op)
+                rewriter.inline_block(op.true_branch.first_block, InsertPoint.before(op))
                 rewriter.erase_op(op)
 
         for op in visit(module, And):
@@ -211,25 +313,6 @@ class DropUselessOperations(ModulePass):
                 rewriter.erase_op(op)
                 rewriter.erase_op(inner)
 
-
-        for op in visit(module, BelongsTo):
-            unit = op.rhs.owner
-            if isinstance(unit, SubjectsIn):
-                if unit.result.uses.get_length() == 1:
-                   unit.result.replace_by(unit.unit)
-                   rewriter.erase_op(unit)
-
-        for op in visit(module, IfStatement):
-            op: IfStatement
-            if len(op.condition.first_block.ops) != 2:
-                continue
-            yield_op = op.condition.first_block.last_op
-            if yield_op.value.owner != op.condition.first_block.first_op:
-                continue
-            if isinstance(yield_op.value.owner, TrueOp):
-                rewriter.erase_op(op.true_branch.first_block.last_op)
-                rewriter.inline_block(op.true_branch.first_block, InsertPoint.before(op))
-                rewriter.erase_op(op)
 
 
 class FlattenConditionalsPass(ModulePass):
@@ -265,6 +348,24 @@ class ResolveAbsoluteReferencesPass(ModulePass):
                 raise NotImplementedError()
             rewriter.erase_op(op)
 
+class ReplaceUnboundedSubjectsWithLoops(ModulePass):
+    name = "replace-unbounded-subjects-with-loops"
+    def apply(self, ctx: Context, module: ModuleOp):
+        rewriter = Rewriter()
+
+        for rlc_fun in visit(module, RLCFunction):
+            for node in visit(rlc_fun, OneOf):
+                node: OneOf
+                for_op = ForAllStatement.make(node.base_subject.first_block.last_op.value)
+                node.result.replace_by(for_op.body.first_block.args[0])
+                move_all_ops(rlc_fun.body.first_block, for_op.body.first_block)
+                move_all_ops(node.base_subject.first_block, rlc_fun.body.first_block)
+                rewriter.erase_op(rlc_fun.body.first_block.last_op)
+                rewriter.insert_op(for_op, InsertPoint.at_end(rlc_fun.body.first_block))
+                rewriter.insert_op(Yield.make(), InsertPoint.at_end(for_op.body.first_block))
+                rewriter.insert_op(Yield.make(), InsertPoint.at_end(rlc_fun.body.first_block))
+                rewriter.erase_op(node)
+
 
 class OptimizeFilteringPass(ModulePass):
     name = "optimize-filtering-pass"
@@ -286,4 +387,5 @@ class OptimizeFilteringPass(ModulePass):
                 rewriter.insert_op(new_op, InsertPoint.before(op))
                 op.result.replace_by(new_op.result)
                 rewriter.erase_op(op)
+
 

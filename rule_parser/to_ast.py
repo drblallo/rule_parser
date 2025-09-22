@@ -102,7 +102,8 @@ class ToAst(Interpreter):
 
     def within_constraint(self, node):
         (quantity, s1) = self.visit_children(node)
-        print(quantity)
+        self.make_referrable(self.current_subject())
+        self.make_referrable(s1)
         return self.add(WithinRange.make(quantity, self.current_subject(), s1))
 
     def constraint(self, node):
@@ -120,6 +121,7 @@ class ToAst(Interpreter):
 
     def select_subject(self, node):
         select = self.add(SelectSubject.make())
+        self.make_referrable(select)
         with self.make_scope(region=select.condition, subject=select.condition.first_block.args[0]) as scope:
             subject = self.visit(node.children[0])
             to_return = self.add(BelongsTo.make(select.condition.first_block.args[0], subject))
@@ -161,11 +163,13 @@ class ToAst(Interpreter):
         with self.make_scope(region=op.source, subject=op.filter_argument(0)) as scope:
             subject1 = self.visit(node.children[0])
             to_return1 = self.add(BelongsTo.make(op.filter_argument(0), subject1))
+            self.make_referrable(subject1)
             self.add(Yield.make(to_return1))
 
         with self.make_scope(region=op.target, subject=op.filter_argument(1)) as scope:
             subject2 = self.visit(node.children[1])
             to_return2 = self.add(BelongsTo.make(op.filter_argument(1), subject2))
+            self.make_referrable(subject2)
             self.add(Yield.make(to_return2))
 
         return op
@@ -175,6 +179,7 @@ class ToAst(Interpreter):
         op = self.add(MakesAnAttack.make())
         with self.make_scope(region=op.condition, subject=op.filter_argument(0)) as scope:
             (subject, ) = self.visit_children(node)
+            self.make_referrable(subject)
             to_return = self.add(BelongsTo.make(op.filter_argument(), subject))
             self.add(Yield.make(to_return))
         return op
@@ -194,8 +199,17 @@ class ToAst(Interpreter):
         return Characteristic.LEADERSHIP
 
     def worsen_characteristic(self, node):
-        (characteristic, subject, quantity) = self.visit_children(node)
-        return self.add(ModifyCharacteristic.make(subject, characteristic, quantity*-1))
+        characteristic = self.visit(node.children[0])
+        quantity = self.visit(node.children[2])
+        to_return = self.add(ModifyCharacteristic.make(characteristic, quantity*-1))
+        with self.make_scope(region=to_return.beneficient) as scope:
+            subject = self.visit(node.children[1])
+            self.make_referrable(subject)
+            self.add(Yield.make(subject))
+
+        with self.make_scope(region=to_return.condition) as scope:
+            self.add(Yield.make(self.add(TrueOp.make())))
+        return to_return
 
     def subtract_effect(self, node):
         (quantity, kind) = self.visit_children(node)
@@ -278,6 +292,7 @@ class ToAst(Interpreter):
         to_return = self.add(ObtainWeaponAbility.make(ability=weapon_ability, qualifier=qualifier))
         with self.make_scope(region=to_return.beneficient) as scope:
             subject = self.visit(node.children[1])
+            self.make_referrable(subject)
             self.add(Yield.make(subject))
 
         with self.make_scope(region=to_return.condition) as scope:
@@ -288,10 +303,14 @@ class ToAst(Interpreter):
     def devastating_wounds(self, node):
         return WeaponAbilityKindAttr(WeaponAbilityKind.DEVASTATING_WOUNDS)
 
+    def make_referrable(self, subject: SSAValue):
+        self.add(MakeReferrable.make(subject))
+
     def leading_constraint(self, node):
         (rhs, ) = self.visit_children(node)
+        self.make_referrable(self.current_subject())
+        self.make_referrable(rhs)
         return self.add(Leading.make(leader=self.current_subject(), unit=rhs)).result
-
 
     def any(self, node):
         typ = self.visit(node.children[0])
@@ -316,6 +335,14 @@ class ToAst(Interpreter):
 
         return reference.result
 
+    def singular_subject(self, node):
+        to_return = self.add(OneOf.make(UnknownType()))
+        with self.make_scope(region=to_return.base_subject) as scope:
+            subject = self.visit(node.children[0])
+            self.add(Yield.make(subject))
+
+        return to_return
+
     def constrained_subject(self, node):
         reference = self.add(AnyMatchingSubject.make(base_type=UnknownType()))
         with self.make_scope(region=reference.base_subject) as scope:
@@ -330,6 +357,7 @@ class ToAst(Interpreter):
 
     def in_subject(self, node):
         (_, rhs) = self.visit_children(node)
+        self.make_referrable(rhs)
         return self.add(SubjectsIn.make(rhs)).result
 
     def unit(self, node):

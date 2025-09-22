@@ -27,6 +27,13 @@ class RLCSerializer(ModulePass):
         raise NotImplementedError()
 
     @visit_expression.register
+    def _(self, node: WithinRange):
+        self.visit_expression(node.source)
+        self.print(".is_within_range(")
+        self.visit_expression(node.target)
+        self.print(f", {node.distance.data})")
+
+    @visit_expression.register
     def _(self, node: WithinEngagementRange):
         self.visit_expression(node.source)
         self.print(".is_in_engagement_range(")
@@ -170,6 +177,10 @@ class RLCSerializer(ModulePass):
         self.print("WeaponAbility(WeaponAbilityKind::" + str(cond.ability.data) + f", {cond.value.data})")
 
     @visit.register
+    def _(self, cond: CharacteristicAttr):
+        self.print("Characteristic::" + str(cond.data))
+
+    @visit.register
     def _(self, cond: WeaponQualifierKindAttr):
         self.print("WeaponQualifierKind::" + str(cond.data))
 
@@ -191,6 +202,16 @@ class RLCSerializer(ModulePass):
             self.declare_var(arg, False, arg.name_hint)
             self.print(", ")
 
+    @visit.register
+    def _(self, cond: GiveCharacteristicModifier):
+        self.print("add_characteristic_modifier(")
+        self.write_var(cond.beneficient)
+        self.print(", ")
+        self.visit(cond.characteristic)
+        self.print(", ")
+        self.visit(cond.quantity)
+        self.println(")")
+
 
     @visit.register
     def _(self, cond: GiveWeaponAbility):
@@ -201,6 +222,19 @@ class RLCSerializer(ModulePass):
         self.print(", ")
         self.visit(cond.qualifier)
         self.println(")")
+
+
+    @visit.register
+    def _(self, cond: ForAllStatement):
+        self.print("for ")
+        self.declare_var(cond.body.first_block.args[0])
+        self.print(" in ")
+        self.write_var(cond.iterable)
+        self.println(":")
+        self.indentation_level = self.indentation_level + 1
+        for op in list(cond.body.ops)[:-1]:
+            self.visit(op)
+        self.indentation_level = self.indentation_level - 1
 
     @visit.register
     def _(self, cond: IfStatement):
@@ -227,7 +261,7 @@ class RLCSerializer(ModulePass):
     @visit.register
     def _(self, cond: Any):
         self.declare_var(cond.result)
-        self.println(f": {cond.result.type.name[4:]}")
+        self.println(f"= all_{cond.result.type.underlying.name[4:]}s()")
 
     def declare_var(self, result: SSAValue, write_let=True, name: str = None):
         if write_let:
@@ -314,6 +348,15 @@ class RLCSerializer(ModulePass):
 
 
     @visit.register
+    def _(self, node: WithinRange):
+        self.declare_var(node.result)
+        self.print("= ")
+        self.write_var(node.source)
+        self.print(".is_within_range(")
+        self.write_var(node.target)
+        self.println(f", {node.distance.data})")
+
+    @visit.register
     def _(self, cond: LeadedUnit):
         self.declare_var(cond.result)
         self.print("= ")
@@ -341,6 +384,28 @@ class RLCSerializer(ModulePass):
         self.print("= ")
         self.write_var(cond.unit)
         self.println(".models")
+
+    @visit.register
+    def _(self, cond: AnyMatchingSubject):
+        for op in list(cond.base_subject.ops)[:-1]:
+            self.visit(op)
+        self.declare_var(cond.result)
+        self.println("= []")
+        self.print("for ")
+        self.declare_var(cond.constraint.first_block.args[0])
+        self.print(" in ")
+        self.write_var(cond.base_subject.first_block.last_op.value)
+        self.println(":")
+        self.indentation_level = self.indentation_level + 1
+        self.print("if ")
+        self.visit_expression(cond.constraint.first_block.last_op.value)
+        self.println(":")
+        self.indentation_level = self.indentation_level + 1
+        self.write_var(cond.result)
+        self.print(".append(")
+        self.write_var(cond.base_subject.first_block.last_op.value)
+        self.println(")")
+        self.indentation_level = self.indentation_level - 2
 
 
     @visit.register

@@ -55,6 +55,7 @@ def make_pipeline(args, out):
     passes.append(ResolveAbsoluteReferencesPass())
     passes.append(DropUselessOperations())
     passes.append(CanonicalizePass())
+    passes.append(ReplaceUnboundedSubjectsWithLoops())
     if args.before_printing:
         passes.append(PrintModulePass(out))
         return passes
