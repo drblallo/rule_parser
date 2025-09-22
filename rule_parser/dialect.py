@@ -102,8 +102,8 @@ class PlayerAttr(EnumAttribute[Player]):
     name = "rul.player"
 
 @irdl_op_definition
-class Any(IRDLOperation):
-    name = "rul.any"
+class All(IRDLOperation):
+    name = "rul.All"
     result: OpResult = result_def()
 
     assembly_format = "attr-dict `->` type($result)"
@@ -444,6 +444,7 @@ class BelowStartingStrenght(IRDLOperation):
     unit: Operand = operand_def(UnitType)
     result: OpResult = result_def(BoolType)
     traits: OpTraits = traits_def(Pure())
+    assembly_format = "$unit attr-dict `:` type($unit) `->` type($result)"
 
     @classmethod
     def make(cls, unit: SSAValue):
@@ -787,13 +788,12 @@ class ConstrainedSuchSubject(IRDLOperation):
     name = "rul.constrained_such_subject"
     result: OpResult = result_def()
     body: Region = region_def()
-    traits: OpTraits = traits_def(Pure())
+    traits: OpTraits = traits_def(Pure(), NoTerminator())
     assembly_format = "$body attr-dict `->` type($result)"
 
     @classmethod
-    def make(cls, type=UnknownType()) -> 'ConstrainedSuchSubject':
+    def make(cls) -> 'ConstrainedSuchSubject':
         to_return = cls.build(result_types=[type], regions=[Region(Block())])
-        to_return.body.first_block.insert_arg(type, 0)
         return to_return
 
 @irdl_op_definition
@@ -845,15 +845,15 @@ class OneOf(IRDLOperation):
 
 
 @irdl_op_definition
-class AnyMatchingSubject(IRDLOperation):
-    name = "rul.any_matching_subject"
+class FilterList(IRDLOperation):
+    name = "rul.filter_list"
 
     base_subject: Region = region_def()
     constraint: Region = region_def()
     result: OpResult = result_def()
     traits: OpTraits = traits_def(RecursivelySpeculatable())
 
-    assembly_format = "`base` $base_subject `constraint` $constraint attr-dict `->` type($result)"
+    assembly_format = "$base_subject $constraint attr-dict `->` type($result)"
 
     def single_base_subject(self):
         if len(self.base_subject.first_block.ops) == 2:
@@ -868,7 +868,7 @@ class AnyMatchingSubject(IRDLOperation):
         return None
 
     @classmethod
-    def make(cls, base_type: Attribute) -> 'AnyMatchingSubject':
+    def make(cls, base_type: Attribute) -> 'FilterList':
         contraint = Region(Block())
         contraint.first_block.insert_arg(base_type, 0)
         return cls.build(result_types=[ListType.make(base_type)], regions=[Region(Block()), contraint])
@@ -1116,7 +1116,7 @@ class Setup(IRDLOperation):
 
 class RulDialect(Dialect):
     def __init__(self):
-        super().__init__(operations=[SelectSubject, EachTimeEffect,BelongsTo, TimedEffect, UntilEffect, IfStatement, RLCFunction, Any, All, ConditionalEffect, TrueOp,HasKeyword, And, IsOwnedBy, ThisSubject, AnyModel, AnyMatchingSubject, IsAttackMadeWeapon, Ability, MovementKindAttr, WeaponQualifierKindAttr, KeywordAttr, CharacteristicAttr, WeaponCharacteristicAttr, WeaponAbilityKindAttr, WeaponAbilityAttr, ObtainWeaponAbility, TimeQualifierAttr, PlayerAttr, BelowHalfStrenght, BelowStartingStrenght, AddUnitToArmy, TargetedWith, BattleShocked, UsingAbilitySubject, Leading, LeadedUnit, DestroyedSubject, ObtainCover, ObtainInvulnerableSave, OnTheBattleField, FellBack, SubjectsIn, SuchSubject], attributes=[ModelType, BoolType, AbilityKindAttr, AbilityType, UnitType, StratagemUseType, AbilityUseType, UnknownType, StratagemType, IntegerRangeAttr, DiceExpression, TimeInstantAttr, TimeEventType])
+        super().__init__(operations=[SelectSubject, EachTimeEffect,BelongsTo, TimedEffect, UntilEffect, IfStatement, RLCFunction, All, ConditionalEffect, TrueOp,HasKeyword, And, IsOwnedBy, ThisSubject, FilterList, IsAttackMadeWeapon, Ability, MovementKindAttr, WeaponQualifierKindAttr, KeywordAttr, CharacteristicAttr, WeaponCharacteristicAttr, WeaponAbilityKindAttr, WeaponAbilityAttr, ObtainWeaponAbility, TimeQualifierAttr, PlayerAttr, BelowHalfStrenght, BelowStartingStrenght, AddUnitToArmy, TargetedWith, BattleShocked, UsingAbilitySubject, Leading, LeadedUnit, DestroyedSubject, ObtainCover, ObtainInvulnerableSave, OnTheBattleField, FellBack, SubjectsIn, SuchSubject], attributes=[ModelType, BoolType, AbilityKindAttr, AbilityType, UnitType, StratagemUseType, AbilityUseType, UnknownType, StratagemType, IntegerRangeAttr, DiceExpression, TimeInstantAttr, TimeEventType])
 
 
 if __name__ == "__main__":

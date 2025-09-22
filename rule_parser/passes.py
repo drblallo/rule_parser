@@ -259,7 +259,7 @@ class DropUselessOperations(ModulePass):
 
         for op in visit(module, BelongsTo):
             unit = op.rhs.owner
-            if isinstance(unit, Any):
+            if isinstance(unit, All):
                 if unit.result.uses.get_length() == 1:
                    true_op = TrueOp.make()
                    op.result.replace_by(true_op.result)
@@ -276,8 +276,8 @@ class DropUselessOperations(ModulePass):
 
         for op in visit(module, BelongsTo):
             unit = op.rhs.owner
-            unit: AnyMatchingSubject
-            if isinstance(unit, AnyMatchingSubject) and isinstance(unit.single_base_subject(), Any):
+            unit: FilterList
+            if isinstance(unit, FilterList) and isinstance(unit.single_base_subject(), All):
                 if unit.result.uses.get_length() != 1:
                     continue
 
@@ -374,13 +374,13 @@ class OptimizeFilteringPass(ModulePass):
         rewriter = Rewriter()
 
         for op in visit_traits(module, CanDefineOperand):
-            if isinstance(op.get_optionally_defined_operand().owner, Any):
+            if isinstance(op.get_optionally_defined_operand().owner, All):
                 op.replace_with_operand_defining_op(rewriter)
 
-        for op in visit(module, AnyMatchingSubject):
+        for op in visit(module, FilterList):
             subject = op.single_base_subject()
             constraint = op.single_constraint()
-            if isinstance(constraint, BelongsTo) and isinstance(subject, Any):
+            if isinstance(constraint, BelongsTo) and isinstance(subject, All):
                 subject.detach()
                 rewriter.insert_op(subject, InsertPoint.before(op))
                 new_op = SubjectsIn.make(constraint.rhs)

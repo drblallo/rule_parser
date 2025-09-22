@@ -259,7 +259,7 @@ class RLCSerializer(ModulePass):
         self.indentation_level = self.indentation_level - 1
 
     @visit.register
-    def _(self, cond: Any):
+    def _(self, cond: All):
         self.declare_var(cond.result)
         self.println(f"= all_{cond.result.type.underlying.name[4:]}s()")
 
@@ -386,7 +386,7 @@ class RLCSerializer(ModulePass):
         self.println(".models")
 
     @visit.register
-    def _(self, cond: AnyMatchingSubject):
+    def _(self, cond: FilterList):
         for op in list(cond.base_subject.ops)[:-1]:
             self.visit(op)
         self.declare_var(cond.result)

@@ -3,6 +3,15 @@ from functools import singledispatchmethod
 from .passes import dominates
 from .passes import merge_preconditions, move_region_content
 
+# returns true if the subject operation that defines some subject could refer to the candidate.
+def refers_to(subject: Operation, candidate: Operation):
+    if isinstance(subject, OneOf):
+        return one_of_refers_to(subject, candidate)
+
+
+def one_of_refers_to(subject: OneOf, candidate):
+    return True
+
 class SemanticalAnalyzer(ModulePass):
     name = "semantical-analyze-pass"
 
@@ -35,7 +44,7 @@ class SemanticalAnalyzer(ModulePass):
         pass
 
     @_visit.register
-    def _(self, op: Any):
+    def _(self, op: All):
         pass
 
     @_visit.register
@@ -93,6 +102,51 @@ class SemanticalAnalyzer(ModulePass):
         self._rewrite_any_matching_subject_as_filter(cond, 1)
 
     @_visit.register
+    def _(self, cond: AdditionalEffect):
+        for op in list(cond.body.ops):
+            self.visit(op)
+
+    @_visit.register
+    def _(self, cond: BelowStartingStrenght):
+        pass
+
+    @_visit.register
+    def _(self, cond: MakeBattleShockTest):
+        pass
+
+    @_visit.register
+    def _(self, cond: ItSubject):
+        cond.result.replace_by(self.seen_subjects[-1])
+        self.rewriter.erase_op(cond)
+
+
+    @_visit.register
+    def _(self, cond: ConstrainedSuchSubject):
+        for op in list(cond.body.ops):
+            self.visit(op)
+        self.rewriter.replace_value_with_new_type(cond.result, cond.body.first_block.last_op.result.type)
+        # we are going to assume that inside this guy there is always a OneOf FilterList
+        subject = cond.body.first_block.first_op
+        for candidate in reversed(self.seen_subjects):
+            if refers_to(subject, candidate.owner):
+                cond.result.replace_by(candidate)
+                self.rewriter.erase_op(cond)
+                return
+
+        print("could not find referred candidate")
+        print(self)
+        print(self.seen_subjects)
+        assert False
+
+
+    @_visit.register
+    def _(self, cond: IfStatement):
+        for op in list(cond.condition.ops):
+            self.visit(op)
+        for op in list(cond.true_branch.ops):
+            self.visit(op)
+
+    @_visit.register
     def _(self, cond: EachTimeEffect):
         for op in list(cond.event.ops):
             self.visit(op)
@@ -111,13 +165,13 @@ class SemanticalAnalyzer(ModulePass):
 
         self.rewriter.replace_value_with_new_type(filtering_op.filter_argument(index), filtering_op.get_belongs_to_argument_type(index).underlying)
 
-        op: AnyMatchingSubject
+        op: FilterList
         op = filtering_op.get_single_selection_candidate(index)
         block = filtering_op.regions[index].first_block
-        if not isinstance(op, AnyMatchingSubject):
+        if not isinstance(op, FilterList):
             return
 
-        filter: AnyMatchingSubject
+        filter: FilterList
         belong: BelongsTo
         yield_op: Yield
         yield_op = block.last_op
@@ -223,19 +277,19 @@ class SemanticalAnalyzer(ModulePass):
     def _(self, ref: OneOf):
         for op in list(ref.base_subject.ops):
             self.visit(op)
-        yield_op = ref.base_subject.first_block.last_op
-        new_type = yield_op.value.type
-        if not isinstance(new_type, ListType) or isinstance(ref.parent_op(), AnyMatchingSubject):
-            ref.result.replace_by(yield_op.value)
+        subject = ref.base_subject.first_block.first_op.result
+        new_type = subject.type
+        self.rewriter.replace_value_with_new_type(ref.result, new_type.underlying)
+
+        if not isinstance(new_type, ListType) or isinstance(ref.parent_op(), FilterList):
+            ref.result.replace_by(subject.result)
             self.rewriter.inline_block(ref.base_subject.last_block, InsertPoint.before(ref))
-            self.rewriter.erase_op(yield_op)
             self.rewriter.erase_op(ref)
             return
 
-        self.rewriter.replace_value_with_new_type(ref.result, new_type.underlying)
 
     @_visit.register
-    def _(self, ref: AnyMatchingSubject):
+    def _(self, ref: FilterList):
         for op in list(ref.base_subject.ops):
             self.visit(op)
         new_type = ref.base_subject.first_block.last_op.value.type
@@ -249,7 +303,7 @@ class SemanticalAnalyzer(ModulePass):
         base_subject = ref.single_base_subject()
         contraint = ref.single_constraint()
 
-        if isinstance(base_subject, AnyMatchingSubject):
+        if isinstance(base_subject, FilterList):
             base_subject.detach()
             self.rewriter.insert_op(base_subject, InsertPoint.before(ref))
             merge_preconditions(ref.constraint.first_block, base_subject.constraint.first_block)
@@ -275,14 +329,6 @@ class SemanticalAnalyzer(ModulePass):
             cond.result.replace_by(op.result)
             self.rewriter.erase_op(cond)
             return
-        if isinstance(cond.model.owner, Any):
-            op = SubjectsIn.make(cond.model.type, cond.rhs)
-            self.rewriter.insert_op(op,InsertPoint.before(cond))
-            cond.result.replace_by(op.result)
-            self.rewriter.erase_op(cond)
-
-
-
 
     @_visit.register
     def _(self, cond: SubjectsIn):

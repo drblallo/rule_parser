@@ -111,6 +111,7 @@ class ToAst(Interpreter):
 
     def boolean_expression(self, node):
         subject = self.visit(node.children[0])
+        self.make_referrable(subject)
 
         with self.make_scope(subject=subject) as scope:
             return self.visit(node.children[1])
@@ -263,10 +264,8 @@ class ToAst(Interpreter):
 
     def such_subject(self, node):
         such = self.add(ConstrainedSuchSubject.make())
-        with self.make_scope(region=such.body, subject=such.body.first_block.args[0]) as scope:
+        with self.make_scope(region=such.body) as scope:
             condition = self.visit(node.children[0])
-            self.add(Yield.make(condition))
-
 
         return such.result
 
@@ -314,7 +313,7 @@ class ToAst(Interpreter):
 
     def any(self, node):
         typ = self.visit(node.children[0])
-        return self.add(Any.make(typ)).result
+        return self.add(All.make(typ)).result
 
     def subject(self, node):
         return self.visit(node.children[0])
@@ -324,7 +323,7 @@ class ToAst(Interpreter):
         return self.add(GainCP.make(quantity))
 
     def forward_constrained_subject(self, node):
-        reference = self.add(AnyMatchingSubject.make(base_type=UnknownType()))
+        reference = self.add(FilterList.make(base_type=UnknownType()))
         with self.make_scope(region=reference.base_subject) as scope:
             subject = self.visit(node.children[1])
             self.add(Yield.make(subject))
@@ -344,7 +343,7 @@ class ToAst(Interpreter):
         return to_return
 
     def constrained_subject(self, node):
-        reference = self.add(AnyMatchingSubject.make(base_type=UnknownType()))
+        reference = self.add(FilterList.make(base_type=UnknownType()))
         with self.make_scope(region=reference.base_subject) as scope:
             subject = self.visit(node.children[0])
             self.add(Yield.make(subject))

@@ -12,8 +12,10 @@ endfunction
 command! -nargs=0 TONE call s:RunTest("Test", "./main.py", expand("%:p"))
 command! -nargs=0 TPRINT call s:RunTest("Test", "./main.py", expand("%:p") . " --before-printing")
 command! -nargs=0 TPRINTT call s:RunTest("Test", "./main.py", expand("%:p") . " --type-checked")
+command! -nargs=0 TPRINTU call s:RunTest("Test", "./main.py", expand("%:p") . " --unchecked")
 
 
 nnoremap <leader><leader>to :TONE<cr>
 nnoremap <leader><leader>tp :TPRINT<cr>
 nnoremap <leader><leader>tt :TPRINTT<cr>
+nnoremap <leader><leader>tu :TPRINTU<cr>
