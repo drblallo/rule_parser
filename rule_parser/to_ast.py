@@ -66,12 +66,12 @@ class ToAst(Interpreter):
         return TimeInstant.COMMAND_PHASE
 
     def if_effect(self, node):
-        to_return = self.add(IfStatement.make())
+        to_return = self.add(ConditionalEffect.make())
         with self.make_scope(region=to_return.condition) as scope:
             condition = self.visit(node.children[0])
             self.add(Yield.make(condition))
 
-        with self.make_scope(region=to_return.true_branch) as scope:
+        with self.make_scope(region=to_return.effect) as scope:
             condition = self.visit(node.children[1])
             self.add(Yield.make())
 

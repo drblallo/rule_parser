@@ -1,12 +1,22 @@
 from .dialect import *
 from typing import List
 from functools import singledispatchmethod
+
+def erase_final_yield(rewriter, region):
+    rewriter.erase_op(region.first_block.last_op)
+
 def move_region_content(dest: Region, src: Region):
     for block in list(dest.blocks):
         dest.erase_block(block)
     for block in list(src.blocks):
         src.detach_block(block)
         dest.add_block(block)
+
+def find_parent_of_type(operation: Operation, type) -> Operation:
+    parent = operation.parent_op()
+    while parent is not None and not isinstance(parent, type):
+        parent = parent.parent_op()
+    return parent
 
 def move_all_ops(src: Block, dst: Block) -> None:
     # snapshot because we'll mutate src
@@ -59,8 +69,8 @@ def visit_traits(module, trait):
 class ExtractTemporaryEffectsPass(ModulePass):
     name = "extract-temporary-effecs"
 
-    def apply(self, ctx: ModuleOp, module: ModuleOp):
-        rewriter = Rewriter()
+    # until effects must be hoisted out into the a global effect with captures
+    def extract_until_effects(self, rewriter, module):
         captures = [capture for capture in visit(module, CapturedReference)]
 
         for op in visit(module, UntilEffect):
@@ -89,12 +99,44 @@ class ExtractTemporaryEffectsPass(ModulePass):
             rewriter.erase_op(op)
 
 
+    def apply(self, ctx: ModuleOp, module: ModuleOp):
+        rewriter = Rewriter()
+        self.extract_until_effects(rewriter, module)
+
+# Sometimes, effects are written in a different sentence than the logical place where they are triggered.
 class InlineDependantEffects(ModulePass):
     name = "inline-dependant-effects"
 
-    def apply(self, ctx: ModuleOp, module: ModuleOp):
+    # additional effects appear to specify that a dependant effect is to executed only if the conditional part of the previous sentence is true. that is, it is inlined in the true branch
+    def inline_additional_effects(self, rewriter: Rewriter, module: ModuleOp):
+        for additional_effect in visit(module, AdditionalEffect):
+            additional_effect: AdditionalEffect
+            captured_references = list(visit(additional_effect, CapturedReference))
+            assert len(captured_references) == 1
+            reference = captured_references[0]
+            reference: CapturedReference
+            referred = reference.value.owner
+            referred: Operation
+            conditional_effect = find_parent_of_type(referred, ConditionalEffect)
+            conditional_effect: ConditionalEffect
+            assert conditional_effect != None
+
+            erase_final_yield(rewriter, additional_effect.body)
+            rewriter.inline_block(additional_effect.body.first_block, InsertPoint.before(conditional_effect.effect.first_block.last_op))
+
+            reference.result.replace_by(reference.value)
+            rewriter.erase_op(reference)
+
+            rewriter.erase_op(additional_effect)
+
+
+
+
+    def apply(self, ctx: Context, module: ModuleOp):
         rewriter = Rewriter()
         objects = []
+        self.inline_additional_effects(rewriter, module)
+
         for top_level_object in list(module.body.ops):
             objects.append([])
             for op in visit(top_level_object, CapturedReference):
@@ -213,11 +255,11 @@ class RewriteEventsPass(ModulePass):
             rewriter.inline_block(op.effect.first_block, InsertPoint.before(true_branch.last_op))
             rewriter.erase_op(op)
 
-def merge_preconditions(to_move: Block, target: Block):
+def merge_preconditions(to_move: Block, target: Block, insert_first=True):
     rewriter = Rewriter()
     for op in reversed(list(to_move.ops)[:-1]):
         op.detach()
-        target.insert_op_before(op,target.first_op)
+        target.insert_op_before(op, target.first_op if insert_first else target.last_op)
 
     for arg1, arg2 in zip(to_move.args, target.args):
         arg1.replace_by(arg2)
@@ -318,12 +360,43 @@ class DropUselessOperations(ModulePass):
 class FlattenConditionalsPass(ModulePass):
     name = "flatten-conditionals-pass"
 
+    # if a conditional effect has multiple prencoditionalble effects, we are going to split the conditional effect into multiple copies, each that contains one of the preconditionable effects.
+    def split_conditional_effects(self, writer: Rewriter, module: ModuleOp):
+        for effect in visit(module, ConditionalEffect):
+            effect: ConditionalEffect
+            effects_to_split = list(effect.effect.first_block.ops)[:-1]
+            if not all(op.has_trait(HasPreconditions) for op in effects_to_split):
+                continue
+
+            for index1, op in enumerate(effects_to_split):
+                clone = effect.clone()
+                writer.insert_op(clone, InsertPoint.before(effect))
+                clone: ConditionalEffect
+                for index2, cloned_effect in enumerate(list(clone.effect.first_block.ops)[:-1]):
+                    if index2 != index1:
+                        writer.erase_op(cloned_effect)
+            writer.erase_op(effect)
+
+
     def apply(self, ctx: Context, module: ModuleOp):
         rewriter = Rewriter()
 
+        self.split_conditional_effects(rewriter, module)
+
+        # if a conditional effect has only one conditional child, inline the conditional effect in the child
         for op in visit(module, ConditionalEffect):
             if len(op.effect.first_block.ops) == 2 and op.effect.first_block.first_op.has_trait(HasPreconditions):
                 merge_preconditions(op.condition.first_block, op.effect.first_block.first_op.condition.first_block)
+                rewriter.erase_op(op.effect.first_block.last_op)
+                rewriter.inline_block(op.effect.first_block, InsertPoint.before(op))
+                rewriter.erase_op(op)
+
+        # if a conditional effect is the only child of a conditional parent, inline into the parent
+        for op in visit(module, ConditionalEffect):
+            parent = op.parent_op()
+            parent: HasPreconditions
+            if parent.has_trait(HasPreconditions) and len(parent.effect.first_block.ops) == 2 and parent.effect.first_block.first_op == op:
+                merge_preconditions(op.condition.first_block, parent.condition.first_block, insert_first=False)
                 rewriter.erase_op(op.effect.first_block.last_op)
                 rewriter.inline_block(op.effect.first_block, InsertPoint.before(op))
                 rewriter.erase_op(op)

@@ -3,14 +3,45 @@ from functools import singledispatchmethod
 from .passes import dominates
 from .passes import merge_preconditions, move_region_content
 
+def compare_filters(container1, lhs: SSAValue, container2, rhs: SSAValue):
+    if lhs.owner.parent_op() == container1:
+        return rhs.owner.parent_op() == container2
+
+    if isinstance(lhs.owner, IsOwnedBy) and isinstance(rhs.owner, IsOwnedBy):
+        return lhs.owner.player == rhs.owner.player and compare_filters(container1, lhs.owner.unit, container2, rhs.owner.unit)
+
+    print("not implemented")
+    print(lhs)
+    print(rhs)
+    assert(False)
+    return False
+
+def equivalent_filter_lists(subject: FilterList, candidate: FilterList):
+    assert(len(subject.base_subject.first_block.ops) == 2 and len(candidate.base_subject.first_block.ops) == 2)
+    if not refers_to(subject.base_subject.first_block.first_op, candidate.base_subject.first_block.first_op):
+        return False
+
+    return compare_filters(subject, subject.constraint.first_block.last_op.value, candidate, candidate.constraint.first_block.last_op.value)
+
 # returns true if the subject operation that defines some subject could refer to the candidate.
 def refers_to(subject: Operation, candidate: Operation):
+    if isinstance(candidate, All):
+        return subject.result.type == candidate.result.type
     if isinstance(subject, OneOf):
-        return one_of_refers_to(subject, candidate)
-
+        if isinstance(candidate, OneOf):
+            return one_of_refers_to(subject, candidate)
+        return False
+    if isinstance(subject, FilterList):
+        if isinstance(candidate, FilterList):
+            return equivalent_filter_lists(subject, candidate)
+        return False
+    print("not equivalent filter lists")
+    print(subject)
+    print(candidate)
+    assert False
 
 def one_of_refers_to(subject: OneOf, candidate):
-    return True
+    return refers_to( subject.base_subject.first_block.first_op, candidate.base_subject.first_block.first_op)
 
 class SemanticalAnalyzer(ModulePass):
     name = "semantical-analyze-pass"
@@ -129,7 +160,12 @@ class SemanticalAnalyzer(ModulePass):
         subject = cond.body.first_block.first_op
         for candidate in reversed(self.seen_subjects):
             if refers_to(subject, candidate.owner):
-                cond.result.replace_by(candidate)
+                if dominates(candidate.owner, cond):
+                    cond.result.replace_by(candidate)
+                else:
+                    caputured_reference = CapturedReference.make(candidate)
+                    cond.result.replace_by(caputured_reference.result)
+                    self.rewriter.insert_op(caputured_reference, InsertPoint.before(cond))
                 self.rewriter.erase_op(cond)
                 return
 
@@ -277,12 +313,13 @@ class SemanticalAnalyzer(ModulePass):
     def _(self, ref: OneOf):
         for op in list(ref.base_subject.ops):
             self.visit(op)
-        subject = ref.base_subject.first_block.first_op.result
+        subject = ref.base_subject.first_block.last_op.value
         new_type = subject.type
         self.rewriter.replace_value_with_new_type(ref.result, new_type.underlying)
 
         if not isinstance(new_type, ListType) or isinstance(ref.parent_op(), FilterList):
-            ref.result.replace_by(subject.result)
+            ref.result.replace_by(subject)
+            self.rewriter.erase_op(ref.base_subject.first_block.last_op)
             self.rewriter.inline_block(ref.base_subject.last_block, InsertPoint.before(ref))
             self.rewriter.erase_op(ref)
             return

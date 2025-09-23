@@ -113,6 +113,26 @@ class RLCSerializer(ModulePass):
         self.println(")")
 
     @visit.register
+    def _(self, cond: BelowStartingStrenght):
+        self.declare_var(cond.result)
+        self.print(" = below_starting_strenght(")
+        self.write_var(cond.unit)
+        self.println(")")
+
+    @visit.register
+    def _(self, cond: MakeBattleShockTest):
+        self.print("make_battle_shock_test(")
+        self.write_var(cond.unit)
+        self.println(")")
+
+    @visit.register
+    def _(self, cond: BelowHalfStrenght):
+        self.declare_var(cond.result)
+        self.print(" = below_half_strenght(")
+        self.write_var(cond.unit)
+        self.println(")")
+
+    @visit.register
     def _(self, cond: IsSame):
         self.declare_var(cond.result)
         self.print(" = ")

@@ -440,7 +440,7 @@ class MakeReferrable(IRDLOperation):
 
 @irdl_op_definition
 class BelowStartingStrenght(IRDLOperation):
-    name = "rul.below_half_strenght"
+    name = "rul.below_starting_strength"
     unit: Operand = operand_def(UnitType)
     result: OpResult = result_def(BoolType)
     traits: OpTraits = traits_def(Pure())
@@ -709,7 +709,6 @@ class ItSubject(IRDLOperation):
 class MakeBattleShockTest(IRDLOperation):
     name = "rul.make_battle_shock"
     unit: Operand = operand_def(UnitType)
-    traits: OpTraits = traits_def(Pure())
 
     assembly_format = "$unit attr-dict `:` type($unit)"
 
