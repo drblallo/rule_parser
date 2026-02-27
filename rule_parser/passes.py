@@ -1,6 +1,15 @@
 from .dialect import *
 from typing import List
 from functools import singledispatchmethod
+import sys
+
+def ancesor_of_type(op: Operation, ancestor_type: type):
+    parent = op.parent_op()
+    while parent is not None:
+        if isinstance(parent, ancestor_type):
+            return parent
+        parent = parent.parent_op()
+    return None
 
 def erase_final_yield(rewriter, region):
     rewriter.erase_op(region.first_block.last_op)
@@ -46,6 +55,13 @@ def dominates(dominator: Operation, dominatee: Operation):
         parent = parent.parent_op()
     return False
 
+class VerifyPass(ModulePass):
+    name = "verify-pass"
+
+
+    def apply(self, ctx: Context, module: ModuleOp):
+        module.verify()
+
 class PrintModulePass(ModulePass):
     name = "print-module-pass"
 
@@ -66,12 +82,35 @@ def visit_traits(module, trait):
     for op in ops:
         yield op
 
+
 class ExtractTemporaryEffectsPass(ModulePass):
     name = "extract-temporary-effecs"
 
     # until effects must be hoisted out into the a global effect with captures
     def extract_until_effects(self, rewriter, module):
+
+        # mark as captured all non local references
+        for op in visit(module, ThisSubject):
+            op: ThisSubject
+
+            # ToDo: generalize this by saying that some operations override what "this x" means
+            if op.result.type == AttackType() and ancesor_of_type(op, MakesAnAttack):
+                continue
+
+            until = ancesor_of_type(op, UntilEffect)
+            if until is None:
+                continue
+
+            capture = CapturedReference.make(op.result)
+            rewriter.insert_op(capture, InsertPoint.before(op))
+            op.detach()
+            rewriter.insert_op(op, InsertPoint.before(until))
+            op.result.replace_by_if(capture.result, lambda use: use.operation != capture)
+
+
+
         captures = [capture for capture in visit(module, CapturedReference)]
+
 
         for op in visit(module, UntilEffect):
             op: UntilEffect
@@ -157,9 +196,29 @@ class InlineDependantEffects(ModulePass):
 class RewriteEventsPass(ModulePass):
     name = "rewrite-events-pass"
 
-    def rewrite_conditional_effect_as_function(self, regions: List[Region], new_op: RLCFunction):
+    def inline_subject_constraint_region(self, to_inline: Region, func_arg: SSAValue, condition_region: Region, inline_at_start=True):
         rewriter = Rewriter()
-        rewriter.insert_op(new_op, InsertPoint.before(regions[0].parent_op()))
+        yield_op = to_inline.first_block.last_op
+        yield_op: Yield
+        is_same = IsSame.make(func_arg, yield_op.value[0])
+        yield_op.operands[0] = is_same.result
+        merge_preconditions(to_inline.first_block, condition_region, inline_at_start)
+        rewriter.insert_op(is_same, InsertPoint.before(condition_region.last_op.prev_op))
+
+    def inline_subject_beloning_constraint_region(self, to_inline: Region, func_arg: SSAValue, condition_region: Region, inline_at_start=True):
+        rewriter = Rewriter()
+        yield_op = to_inline.first_block.last_op
+        yield_op: Yield
+        is_same = BelongsTo.make(func_arg, yield_op.value[0])
+        rewriter.insert_op(is_same, InsertPoint.before(yield_op))
+        yield_op.operands[0] = is_same.result
+        merge_preconditions(to_inline.first_block, condition_region, insert_first=inline_at_start)
+
+    def rewrite_conditional_effect_as_function(self, op: MappableOntoFunction):
+        new_op = RLCFunction.make(op)
+        rewriter = Rewriter()
+
+        rewriter.insert_op(new_op, InsertPoint.before(op))
 
         if_stmt = IfStatement.make()
         rewriter.insert_op(if_stmt, InsertPoint.at_end(new_op.body.first_block))
@@ -167,7 +226,7 @@ class RewriteEventsPass(ModulePass):
         if_stmt_condition = if_stmt.condition.first_block
 
         yielded_values = []
-        for region in regions:
+        for region in [op.condition]:
             yielded_value = region.first_block.last_op.value
             rewriter.erase_op(region.first_block.last_op)
             rewriter.inline_block(region.first_block, InsertPoint.at_start(if_stmt_condition))
@@ -183,76 +242,47 @@ class RewriteEventsPass(ModulePass):
         rewriter.insert_op(yield_op, InsertPoint.at_end(if_stmt_condition))
 
         rewriter.insert_op(Yield.create(), InsertPoint.at_end(if_stmt.true_branch.first_block))
+        rewriter.erase_op(op.effect.first_block.last_op)
+        rewriter.inline_block(op.effect.first_block, InsertPoint.before(if_stmt.true_branch.first_block.last_op))
 
         return (new_op, if_stmt.condition.first_block, if_stmt.true_branch.first_block)
 
     def apply(self, ctx: ModuleOp, module: ModuleOp):
         rewriter = Rewriter()
         for op in visit(module, ObtainWeaponAbility):
-            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.condition], RLCFunction.make_event("on_evaluate_weapon_abilities"))
-            condition_value1 = cond.last_op.value
-            rewriter.erase_op(cond.last_op)
-
-            acceptable_models = op.beneficient.first_block.last_op.value
-            rewriter.erase_op(op.beneficient.first_block.last_op)
-            rewriter.inline_block(op.beneficient.first_block, InsertPoint.at_end(cond))
-
-            belongs_to = BelongsTo.make(func.body.first_block.args[3], acceptable_models)
-            rewriter.insert_op(belongs_to, InsertPoint.after(cond.last_op))
-            and_op = And.make(condition_value1, belongs_to.result)
-            rewriter.insert_op(and_op, InsertPoint.after(cond.last_op))
-            rewriter.insert_op(Yield.make(and_op), InsertPoint.after(cond.last_op))
-
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function(op)
+            self.inline_subject_beloning_constraint_region(op.beneficient, func.get_arg("evaluated_model"), cond, False)
+            rewriter.insert_op(GiveWeaponAbility.make(func.get_arg('evaluated_model'), op.ability, op.qualifier), InsertPoint.at_start(true_branch))
             rewriter.erase_op(op)
-            rewriter.insert_op(GiveWeaponAbility.make(func.body.first_block.args[3], op.ability, op.qualifier), InsertPoint.at_start(true_branch))
+
+        for op in visit(module, ObtainInvulnerableSave):
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function(op)
+            self.inline_subject_constraint_region(op.beneficient, func.get_arg("evaluated_model"), cond, False)
+            rewriter.insert_op(GiveInvulterability.make(op.value, func.get_arg('evaluated_model')), InsertPoint.at_start(true_branch))
+            rewriter.erase_op(op)
 
         for op in visit(module, ModifyCharacteristic):
-            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.condition], RLCFunction.make_event("on_evaluate_characteristic"))
-            condition_value1 = cond.last_op.value
-            rewriter.erase_op(cond.last_op)
-
-            acceptable_models = op.beneficient.first_block.last_op.value
-            rewriter.erase_op(op.beneficient.first_block.last_op)
-            rewriter.inline_block(op.beneficient.first_block, InsertPoint.at_end(cond))
-
-            belongs_to = BelongsTo.make(func.body.first_block.args[3], acceptable_models)
-            rewriter.insert_op(belongs_to, InsertPoint.after(cond.last_op))
-            and_op = And.make(condition_value1, belongs_to.result)
-            rewriter.insert_op(and_op, InsertPoint.after(cond.last_op))
-            rewriter.insert_op(Yield.make(and_op), InsertPoint.after(cond.last_op))
-
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function(op)
+            self.inline_subject_constraint_region(op.beneficient, func.get_arg("evaluated_model"), cond, False)
+            rewriter.insert_op(GiveCharacteristicModifier.make(func.get_arg("evaluated_model"), op.characteristic, op.quantity), InsertPoint.at_start(true_branch))
             rewriter.erase_op(op)
-            rewriter.insert_op(GiveCharacteristicModifier.make(func.body.first_block.args[3], op.characteristic, op.quantity), InsertPoint.at_start(true_branch))
 
         for op in visit(module, TimedEffect):
             op: TimedEffect
-            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.condition], RLCFunction.make_time_event(op.event_name()))
-            rewriter.erase_op(op.effect.first_block.last_op)
-            rewriter.inline_block(op.effect.first_block, InsertPoint.at_start(true_branch))
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function(op)
             rewriter.erase_op(op)
 
         for op in visit(module, MakesAnAttack):
             op: MakesAnAttack
-            func = RLCFunction.make_attack_event("on_attack")
-            op.condition.first_block.args[0].replace_by(func.get_attack_source())
-            op.condition.first_block.args[1].replace_by(func.get_attack_target())
-            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.condition], func)
-            op.effect.first_block.args[0].replace_by(func.get_attack_source())
-            op.effect.first_block.args[1].replace_by(func.get_attack_target())
-            rewriter.erase_op(op.effect.first_block.last_op)
-            rewriter.inline_block(op.effect.first_block, InsertPoint.before(true_branch.last_op))
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function(op)
+            self.inline_subject_constraint_region(op.subject, func.get_arg("source_model"), cond)
             rewriter.erase_op(op)
 
         for op in visit(module, Destroys):
             op: Destroys
-            func = RLCFunction.make_attack_event("on_destroys")
-            op.source.first_block.args[0].replace_by(func.get_attack_source())
-            op.target.first_block.args[0].replace_by(func.get_attack_target())
-            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function([op.source, op.target], func)
-            op.effect.first_block.args[0].replace_by(func.get_attack_source())
-            op.effect.first_block.args[1].replace_by(func.get_attack_target())
-            rewriter.erase_op(op.effect.first_block.last_op)
-            rewriter.inline_block(op.effect.first_block, InsertPoint.before(true_branch.last_op))
+            (func, cond, true_branch) = self.rewrite_conditional_effect_as_function(op)
+            self.inline_subject_constraint_region(op.source, func.get_arg("source_model"), cond)
+            self.inline_subject_constraint_region(op.target, func.get_arg("target_model"), cond)
             rewriter.erase_op(op)
 
 def merge_preconditions(to_move: Block, target: Block, insert_first=True):
@@ -273,6 +303,43 @@ class DropUselessOperations(ModulePass):
 
     def apply(self, ctx: OpResult, module: ModuleOp):
         rewriter = Rewriter()
+
+        # if thre is a belongs(subjectsIn(X)) just write belongsTo(x)
+        for op in visit(module, BelongsTo):
+            unit = op.rhs.owner
+            if isinstance(unit, SubjectsIn):
+                if unit.result.uses.get_length() == 1:
+                   unit.result.replace_by(unit.unit)
+                   rewriter.erase_op(unit)
+
+
+        # if there is a pure operation that returns a unit X, and that unit has two users, and those users are is_leading Y X and belongs_to Z X, then we can rewrite as X = leaded_unit Y, belongs_to Z X
+        for op in visit_traits(module, Pure):
+            op: Operation
+            if len(op.results) != 1 or not isinstance(op.result_types[0], UnitType):
+                continue
+
+            if op.results[0].uses.get_length() != 2:
+                continue
+            (belongs_to, leading) = op.results[0].uses
+            (belongs_to, leading) = (belongs_to.operation, leading.operation)
+            if not isinstance(belongs_to, BelongsTo):
+                (belongs_to, leading) = (leading, belongs_to)
+            if not isinstance(belongs_to, BelongsTo) or not isinstance(leading, Leading):
+                continue
+            leading: Leading
+            belongs_to: BelongsTo
+
+            leaded = LeadedUnit.make(leading.leader, UnitType())
+            op.results[0].replace_by(leaded.unit)
+            leading.result.replace_by(leaded.result)
+            rewriter.insert_op(leaded, InsertPoint.before(op))
+            rewriter.erase_op(leading)
+            rewriter.erase_op(op)
+
+
+
+        # if there is a Y = OneOf X followed by a IsSame Y Z, just replace them both with BelongsTo Z X
         for op in visit(module, IsSame):
             op: IsSame
             if isinstance(op.rhs.owner, OneOf) and op.rhs.uses.get_length() == 1:
@@ -299,6 +366,7 @@ class DropUselessOperations(ModulePass):
                 rewriter.erase_op(op)
                 rewriter.erase_op(any_of)
 
+        # if there is a BelongsTo(X, All()), replace with True
         for op in visit(module, BelongsTo):
             unit = op.rhs.owner
             if isinstance(unit, All):
@@ -311,20 +379,13 @@ class DropUselessOperations(ModulePass):
 
         for op in visit(module, BelongsTo):
             unit = op.rhs.owner
-            if isinstance(unit, SubjectsIn):
-                if unit.result.uses.get_length() == 1:
-                   unit.result.replace_by(unit.unit)
-                   rewriter.erase_op(unit)
-
-        for op in visit(module, BelongsTo):
-            unit = op.rhs.owner
             unit: FilterList
             if isinstance(unit, FilterList) and isinstance(unit.single_base_subject(), All):
                 if unit.result.uses.get_length() != 1:
                     continue
 
                 unit.constraint.first_block.args[0].replace_by(op.model)
-                op.result.replace_by(unit.constraint.first_block.last_op.value)
+                op.result.replace_by(unit.constraint.first_block.last_op.value[0])
                 rewriter.erase_op(unit.constraint.first_block.last_op)
                 rewriter.inline_block(unit.constraint.first_block, InsertPoint.before(op))
                 rewriter.erase_op(op)
@@ -335,9 +396,9 @@ class DropUselessOperations(ModulePass):
             if len(op.condition.first_block.ops) != 2:
                 continue
             yield_op = op.condition.first_block.last_op
-            if yield_op.value.owner != op.condition.first_block.first_op:
+            if yield_op.value[0].owner != op.condition.first_block.first_op:
                 continue
-            if isinstance(yield_op.value.owner, TrueOp):
+            if isinstance(yield_op.value[0].owner, TrueOp):
                 rewriter.erase_op(op.true_branch.first_block.last_op)
                 rewriter.inline_block(op.true_branch.first_block, InsertPoint.before(op))
                 rewriter.erase_op(op)
@@ -414,10 +475,15 @@ class ResolveAbsoluteReferencesPass(ModulePass):
             if not parent:
                 continue
             if isinstance(op.result.type, ModelType):
-                op.result.replace_by(parent.get_this_model())
+                op.result.replace_by(parent.get_arg("self_model"))
             elif isinstance(op.result.type, AttackType):
-                op.result.replace_by(parent.get_attack_attack())
+                op.result.replace_by(parent.get_arg("attack"))
+            elif isinstance(op.result.type, AbilityType):
+                new_value = ThisAbility.make()
+                rewriter.insert_op(new_value, InsertPoint.before(op))
+                op.result.replace_by(new_value.result)
             else:
+                print(op)
                 raise NotImplementedError()
             rewriter.erase_op(op)
 
@@ -429,7 +495,7 @@ class ReplaceUnboundedSubjectsWithLoops(ModulePass):
         for rlc_fun in visit(module, RLCFunction):
             for node in visit(rlc_fun, OneOf):
                 node: OneOf
-                for_op = ForAllStatement.make(node.base_subject.first_block.last_op.value)
+                for_op = ForAllStatement.make(node.base_subject.first_block.last_op.value[0])
                 node.result.replace_by(for_op.body.first_block.args[0])
                 move_all_ops(rlc_fun.body.first_block, for_op.body.first_block)
                 move_all_ops(node.base_subject.first_block, rlc_fun.body.first_block)

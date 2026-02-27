@@ -94,6 +94,13 @@ single_effect: conditional_effect
              | temporary_effect
              | imperative_rule
              | select_effect
+             | modified_effect
+
+modified_effect: "Once per"i use_limit ","i single_effect -> once_per_effect
+
+use_limit: "battle round"i -> battle_round_limit
+        | "turn"i         -> turn_limit
+        | "battle"i       -> battle_limit
 
 additional_effect: "in addition,"i effect   -> additional_effect
 
@@ -101,14 +108,17 @@ temporary_effect: "until"i time_condition "," effect -> until_effect
 
 select_effect: "select one"i subject -> select_subject
 
-timed_effect: "at"i time_condition ","i effect    -> at_event
-            | "each time"i event ","i effect      -> each_time
-            | "in"i time_condition "," effect     -> at_event 
+timed_effect: "at"i time_condition ","i effect         -> at_event
+            | "each time"i event ","i effect           -> each_time
+            | "in"i time_condition "," effect          -> at_event 
+            | effect "when"i event                     -> trailing_when_effect 
 
-event: subject "makes an attack"  -> makes_an_attack
-     | subject "destroys" subject -> destroys
+event: subject "makes an attack"          -> makes_an_attack
+     | subject "destroys" subject         -> destroys
+     | subject "is targeted with" subject -> is_targeted_with
 
 time_condition: "the"i time_qualifier "of the" phase_instant
+              | "the"i time_qualifier "of any phase" -> any_phase_instant
               | "the"i step_instant "of your opponent’s"i phase_instant -> oppo_step_condition
 
 
@@ -117,21 +127,31 @@ time_qualifier: "start"i -> time_start
 
 conditional_effect: "while"i boolean_expression ","i effect -> while_true_effect
                   | "if"i boolean_expression ","i effect    -> if_effect 
+                  | "if it does,"i effect                   -> if_it_does 
 
-imperative_rule: [weapon_qualifier] "weapons equipped by"i subject "have the"i weapon_ability "ability" -> obtain_weapon_ability
-               | "subtract"i quantity "from the"i roll_kind "roll" -> subtract_effect
+imperative_rule:  "subtract"i quantity "from the"i roll_kind "roll" -> subtract_effect
                | "you gain"i quantity "cp"i -> gain_cps 
                | "worsen the"i characteristic "characteristic of"i subject "by"i quantity -> worsen_characteristic
                | subject "must take a battle-shock test"i -> generate_battle_shock_test
+               | "reduce the CP cost of that usage of that stratagem by"i quantity "cp"i -> reduce_cp_cost 
+               | subject "can use"i subject -> can_use
+               |  obtainable_property -> subject_obtains_property
+
+obtainable_property: subject "has"i "a" quantity "+ invulnerable save"i -> obtains_invulnerable_save
+                   | [weapon_qualifier] "weapons equipped by"i subject "have the"i weapon_ability "ability" -> obtain_weapon_ability
+
 
 boolean_expression: subject "is"i is_constraint
 
-subject: subject constraint          -> constrained_subject
-       | forward_constraint subject  -> forward_constrained_subject
-       | "this"i subject_type        -> this_model
-       | base_subject           
-       | "a"i subject                -> singular_subject 
-       | "an"i subject               -> singular_subject
+subject: constrained_subject                     -> list_of_subjects 
+       | "a"i constrained_subject                -> singular_subject 
+       | "an"i constrained_subject               -> singular_subject
+       | "one"i constrained_subject              -> singular_subject
+
+constrained_subject: constrained_subject constraint          -> constrained_subject_with_constraint
+       | forward_constraint constrained_subject              -> forward_constrained_subject
+       | "this"i subject_type                                -> this_model
+       | base_subject                                        -> base_subject
 
 
 base_subject: subject_type                              -> any
@@ -143,12 +163,17 @@ base_subject: subject_type                              -> any
 subject_type: "unit"i                           -> unit
             | "model"i                          -> model
             | "models"i                         -> model
+            | "stratagem"i                      -> stratagem_subject_type
+            | "ability"i                        -> ability_subject 
 
 forward_constraint: "enemy"i                -> enemy 
                   | "allied"i               -> allied 
+                  | "friendly"i             -> allied 
                   | model_keyword           -> keyworded_constraint
 
 constraint: is_constraint
+          | "from your army"                -> from_your_army
+          | "with this ability"             -> with_this_ability 
 
 is_constraint: "within"i quantity "\" of" subject         -> within_constraint 
              | "leading" subject                          -> leading_constraint

@@ -15,6 +15,8 @@ command! -nargs=0 TPRINTT call s:RunTest("Test", "./main.py", expand("%:p") . " 
 command! -nargs=0 TPRINTU call s:RunTest("Test", "./main.py", expand("%:p") . " --unchecked")
 command! -nargs=0 TPRINTI call s:RunTest("Test", "./main.py", expand("%:p") . " --after-inline")
 command! -nargs=0 TPRINTC call s:RunTest("Test", "./main.py", expand("%:p") . " --canonicalized")
+command! -nargs=0 TPRINTB call s:RunTest("Test", "./main.py", expand("%:p") . " --before-bounding")
+command! -nargs=0 TPRINTE call s:RunTest("Test", "./main.py", expand("%:p") . " --after-events")
 
 
 nnoremap <leader><leader>to :TONE<cr>
@@ -23,3 +25,5 @@ nnoremap <leader><leader>tt :TPRINTT<cr>
 nnoremap <leader><leader>tu :TPRINTU<cr>
 nnoremap <leader><leader>ti :TPRINTI<cr>
 nnoremap <leader><leader>tc :TPRINTC<cr>
+nnoremap <leader><leader>tb :TPRINTB<cr>
+nnoremap <leader><leader>te :TPRINTE<cr>

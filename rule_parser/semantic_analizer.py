@@ -1,6 +1,6 @@
 from .dialect import *
 from functools import singledispatchmethod
-from .passes import dominates
+from .passes import dominates, visit
 from .passes import merge_preconditions, move_region_content
 
 def compare_filters(container1, lhs: SSAValue, container2, rhs: SSAValue):
@@ -21,7 +21,7 @@ def equivalent_filter_lists(subject: FilterList, candidate: FilterList):
     if not refers_to(subject.base_subject.first_block.first_op, candidate.base_subject.first_block.first_op):
         return False
 
-    return compare_filters(subject, subject.constraint.first_block.last_op.value, candidate, candidate.constraint.first_block.last_op.value)
+    return compare_filters(subject, subject.constraint.first_block.last_op.value[0], candidate, candidate.constraint.first_block.last_op.value[0])
 
 # returns true if the subject operation that defines some subject could refer to the candidate.
 def refers_to(subject: Operation, candidate: Operation):
@@ -46,7 +46,18 @@ def one_of_refers_to(subject: OneOf, candidate):
 class SemanticalAnalyzer(ModulePass):
     name = "semantical-analyze-pass"
 
+    def analyze_subjects(self, module: ModuleOp):
+        referrable_subject = sorted(visit(module, MakeReferrable), key=lambda x: x.index.data)
+        for subject in referrable_subject:
+            subject: MakeReferrable
+            if not isinstance(subject.subject.owner, Block):
+                self.visit(subject.subject.owner)
+            self.visit(subject)
+
     def apply(self, ctx: Context, module: ModuleOp):
+        self.builder = Builder(InsertPoint.at_start(module.body.first_block))
+        self.analyze_subjects(module)
+
         self.visit(module)
 
     def __init__(self):
@@ -54,13 +65,16 @@ class SemanticalAnalyzer(ModulePass):
         self.builder = None
         self.rewriter = Rewriter()
         self.seen_subjects = []
+        self.last_optionally_usable = None
 
     def add(self, operation):
         self.builder.insert(operation)
         return operation
 
     def visit(self, node: Operation):
-        if node.parent is not None:
+        if isinstance(node, Block):
+            self.builder.insertion_point = InsertPoint.at_start(node)
+        elif node.parent is not None:
             self.builder.insertion_point = InsertPoint.after(node)
         self._visit(node)
 
@@ -69,6 +83,10 @@ class SemanticalAnalyzer(ModulePass):
     def _visit(self, node):
         print(type(node))
         raise NotImplementedError()
+
+    @_visit.register
+    def _(self, op: CapturedReference):
+        self.rewriter.replace_value_with_new_type(op.result, op.value.type)
 
     @_visit.register
     def _(self, op: WithinRange):
@@ -88,7 +106,6 @@ class SemanticalAnalyzer(ModulePass):
 
     @_visit.register
     def _(self, module: ModuleOp):
-        self.builder = Builder(InsertPoint.at_start(module.body.first_block))
         for op in list(module.body.ops):
             self.visit(op)
 
@@ -111,10 +128,11 @@ class SemanticalAnalyzer(ModulePass):
 
     @_visit.register
     def _(self, cond: MakesAnAttack):
+        for op in list(cond.subject.ops):
+            self.visit(op)
         for op in list(cond.condition.ops):
             self.visit(op)
 
-        self._rewrite_any_matching_subject_as_filter(cond)
 
     @_visit.register
     def _(self, cond: GainCP):
@@ -128,9 +146,9 @@ class SemanticalAnalyzer(ModulePass):
             self.visit(op)
         for op in list(cond.effect.ops):
             self.visit(op)
+        for op in list(cond.condition.ops):
+            self.visit(op)
 
-        self._rewrite_any_matching_subject_as_filter(cond, 0)
-        self._rewrite_any_matching_subject_as_filter(cond, 1)
 
     @_visit.register
     def _(self, cond: AdditionalEffect):
@@ -211,7 +229,7 @@ class SemanticalAnalyzer(ModulePass):
         belong: BelongsTo
         yield_op: Yield
         yield_op = block.last_op
-        belong = yield_op.value.owner
+        belong = yield_op.value[0].owner
         filter = belong.rhs.owner
 
         filter.constraint.first_block.args[0].replace_by(block.args[0])
@@ -235,6 +253,8 @@ class SemanticalAnalyzer(ModulePass):
 
     @_visit.register
     def _(self, cond: SelectSubject):
+        if not isinstance(cond.result.type, UnknownType):
+            return
         for op in list(cond.condition.ops):
             self.visit(op)
 
@@ -253,6 +273,39 @@ class SemanticalAnalyzer(ModulePass):
             self.visit(op)
         for op in list(cond.effect.ops):
             self.visit(op)
+
+    @_visit.register
+    def _(self, cond: OptionallyUse):
+        self.last_optionally_usable = cond
+
+    @_visit.register
+    def _(self, cond: IfItDoes):
+        block = cond.effect.first_block
+        cond.effect.detach_block(cond.effect.first_block)
+        self.last_optionally_usable.effect.add_block(block)
+        self.rewriter.erase_op(cond)
+        for op in list(self.last_optionally_usable.effect.ops):
+            self.visit(op)
+
+    @_visit.register
+    def _(self, cond: ModifyCPCost):
+        return
+
+    @_visit.register
+    def _(self, cond: HasAbility):
+        return
+
+    @_visit.register
+    def _(self, cond: ThisAbility):
+        return
+
+    @_visit.register
+    def _(self, cond: OncePer):
+        for op in list(cond.body.ops):
+            self.visit(op)
+        self.last_optionally_usable.use_limit = cond.value
+        self.rewriter.inline_block(cond.body.first_block, InsertPoint.before(cond))
+        self.rewriter.erase_op(cond)
 
 
     @_visit.register
@@ -278,6 +331,11 @@ class SemanticalAnalyzer(ModulePass):
         pass
 
     @_visit.register
+    def _(self, cond: ObtainInvulnerableSave):
+        for op in list(cond.beneficient.ops):
+            self.visit(op)
+
+    @_visit.register
     def _(self, cond: ObtainWeaponAbility):
         for op in list(cond.beneficient.ops):
             self.visit(op)
@@ -285,6 +343,15 @@ class SemanticalAnalyzer(ModulePass):
     @_visit.register
     def _(self, cond: TrueOp):
         pass
+
+    @_visit.register
+    def _(self, operation: Targets):
+        for op in list(operation.subjects.ops):
+            self.visit(op)
+        for op in list(operation.condition.ops):
+            self.visit(op)
+        for op in list(operation.effect.ops):
+            self.visit(op)
 
 
     @_visit.register
@@ -313,7 +380,7 @@ class SemanticalAnalyzer(ModulePass):
     def _(self, ref: OneOf):
         for op in list(ref.base_subject.ops):
             self.visit(op)
-        subject = ref.base_subject.first_block.last_op.value
+        subject = ref.base_subject.first_block.last_op.value[0]
         new_type = subject.type
         self.rewriter.replace_value_with_new_type(ref.result, new_type.underlying)
 
@@ -329,7 +396,7 @@ class SemanticalAnalyzer(ModulePass):
     def _(self, ref: FilterList):
         for op in list(ref.base_subject.ops):
             self.visit(op)
-        new_type = ref.base_subject.first_block.last_op.value.type
+        new_type = ref.get_yielded_base_subject().type
         result_type = new_type
         base_type = new_type.underlying if isinstance(new_type, ListType) else new_type
         self.rewriter.replace_value_with_new_type(ref.result, result_type)

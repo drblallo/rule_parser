@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from xdsl.ir import Block, Region, Dialect, Attribute, ParametrizedAttribute, EnumAttribute, SSAValue, Operation
+from xdsl.ir import Block, Region, Dialect, Attribute, ParametrizedAttribute, EnumAttribute, SSAValue, Operation, SSAValues
+import sys
 from xdsl.passes import ModulePass, PassPipeline
 from xdsl.transforms.canonicalize import CanonicalizePass
 from functools import lru_cache
@@ -8,7 +9,7 @@ from xdsl.rewriter import Rewriter
 from xdsl.context import Context
 from xdsl.printer import Printer
 from xdsl.traits import NoTerminator, IsTerminator, OpTrait, Pure, RecursivelySpeculatable
-from xdsl.dialects.builtin import ModuleOp, StringAttr, IntAttr, AnyOf, AttrConstraint
+from xdsl.dialects.builtin import ModuleOp, StringAttr, IntAttr, AnyOf, AttrConstraint, UnitAttr
 from xdsl.irdl import irdl_op_definition, OpResult, Operand, IRDLOperation, result_def, irdl_attr_definition, attr_constr_coercion, Data, attr_def, operand_def, region_def, BaseAttr, OpTraits, traits_def, ParamDef, opt_operand_def, opt_result_def, var_operand_def
 from enum import Enum, StrEnum, auto
 
@@ -21,11 +22,6 @@ class TargetableTypeInterface(ABC):
 
 class EventTypeInterface(ABC):
     pass
-
-# means that the operation has a filter in a region
-class FilteringInterface(OpTrait):
-    def get_this_model(self, op):
-        raise NotImplementedError()
 
 class CanDefineOperand(OpTrait):
     def replace_with_operand_defining_op(self, op):
@@ -233,7 +229,7 @@ class TimeQualifier(StrEnum):
     END = auto()
 
 class TimeQualifierAttr(EnumAttribute[TimeQualifier]):
-    name = "rul.time_qualifier"
+    name = "rul.time_qualifier_"
 
 class TimeInstant(StrEnum):
     FIGHT_PHASE = auto()
@@ -244,12 +240,14 @@ class TimeInstant(StrEnum):
     SHOOTING_PHASE= auto()
     TURN = auto()
     ANY_BATTLE_ROUND = auto()
+    ANY_PHASE = auto()
     FIRST_BATTLE_ROUND = auto()
     BATTLE = auto()
     MOVEMENT_PHASE = auto()
+    TARGETING = auto()
 
 class TimeInstantAttr(EnumAttribute[TimeInstant]):
-    name = "rul.time_instant"
+    name = "rul.time_instant_"
 
 
 
@@ -333,6 +331,45 @@ class RollKind(StrEnum):
 class RollKindAttr(EnumAttribute[RollKind]):
     name = "rul.roll_kind"
 
+class UseLimit(StrEnum):
+    NOLIMIT = auto()
+    PHASE = auto()
+    TURN = auto()
+    ROUND = auto()
+    BATTLE = auto()
+
+class UseLimitAttr(EnumAttribute[TimeInstant]):
+    name = "rul.use_limit_"
+
+@irdl_op_definition
+class OptionallyUse(IRDLOperation):
+    name = "rul.optionally_use"
+    characteristic: Attribute = attr_def(CharacteristicAttr)
+    user: Operand = operand_def(AnyOf([ModelType, UnitType]))
+    used: Operand = operand_def(AnyOf([ModelType, UnitType]))
+    # effect that trigger if the user performs the action
+    effect: Region = region_def()
+    use_limit: UseLimitAttr = attr_def(UseLimitAttr)
+
+    assembly_format = "$user $used $use_limit $effect attr-dict `:` type($user) `,` type($used)"
+
+    @classmethod
+    def make(cls, user: SSAValue, used: SSAValue, use_limit_attr: UseLimitAttr = UseLimitAttr(UseLimit.NOLIMIT)) -> 'Can':
+        to_return = cls.build(operands=[user, used], regions=[Region()], attributes={"use_limit": use_limit_attr})
+        return to_return
+
+@irdl_op_definition
+class ModifyCPCost(IRDLOperation):
+    name = "rul.modify_cp_cost"
+    quantity: Attribute = attr_def(IntAttr)
+
+    assembly_format = "$quantity attr-dict"
+
+    @classmethod
+    def make(cls, quantity: int) -> 'ModifyCPCost':
+        to_return = cls.build(attributes={'quantity': IntAttr(quantity)})
+        return to_return
+
 @irdl_op_definition
 class GiveCharacteristicModifier(IRDLOperation):
     name = "rul.give_characteristic_modifier"
@@ -348,21 +385,6 @@ class GiveCharacteristicModifier(IRDLOperation):
         to_return = cls.build(attributes={"characteristic": characteristic, 'quantity': quantity}, operands=[beneficient])
         return to_return
 
-@irdl_op_definition
-class ModifyCharacteristic(IRDLOperation):
-    name = "rul.modify_characteristic"
-    characteristic: Attribute = attr_def(CharacteristicAttr)
-    quantity: Attribute = attr_def(IntAttr)
-    condition = region_def()
-    beneficient = region_def()
-    traits: OpTraits = traits_def(HasPreconditions())
-
-    assembly_format = "$characteristic $quantity $condition $beneficient attr-dict"
-
-    @classmethod
-    def make(cls, characteristic: Characteristic, quantity: int) -> 'ModifyRoll':
-        to_return = cls.build(attributes={"characteristic": CharacteristicAttr(characteristic), 'quantity': IntAttr(quantity)}, regions=[Region(Block()), Region(Block())])
-        return to_return
 
 @irdl_op_definition
 class ModifyRoll(IRDLOperation):
@@ -378,23 +400,6 @@ class ModifyRoll(IRDLOperation):
         to_return = cls.build(attributes={"roll": RollKindAttr(roll), 'quantity': IntAttr(quantity)}, operands=[to_modify])
         return to_return
 
-@irdl_op_definition
-class TimedEffect(IRDLOperation):
-    name = "rul.timed_effect"
-    event: Attribute = attr_def(TimeEventType)
-    condition = region_def()
-    effect = region_def()
-    traits: OpTraits = traits_def(HasPreconditions())
-
-    assembly_format = "`condition` $condition  `effect` $effect `event` $event attr-dict "
-
-    def event_name(self) -> str:
-        return self.event.event_name()
-
-    @classmethod
-    def make(cls, time_event: TimeEventType) -> 'TimedEffect':
-        to_return = cls.build(regions=[Region(Block()),Region(Block())], attributes={"event": time_event})
-        return to_return
 
 class FilteringOp:
     def get_single_selection_candidate(self, index = 0):
@@ -405,17 +410,16 @@ class FilteringOp:
 
 
     def get_belongs_to_argument_type(self, index = 0):
-        return self.regions[index].first_block.last_op.value.owner.rhs.type
+        return self.regions[index].first_block.last_op.value[0].owner.rhs.type
 
     def is_filtering_structure(self, index = 0):
-        return isinstance(self.regions[index].first_block.last_op.value.owner, BelongsTo)
+        return isinstance(self.regions[index].first_block.last_op.value[0].owner, BelongsTo)
 
 @irdl_op_definition
 class SelectSubject(IRDLOperation, FilteringOp):
     name = "rul.select_subject"
     condition = region_def()
     result: OpResult = result_def()
-    traits: OpTraits = traits_def(FilteringInterface())
 
     assembly_format = " $condition attr-dict `->` type($result)"
 
@@ -431,10 +435,11 @@ class SelectSubject(IRDLOperation, FilteringOp):
 class MakeReferrable(IRDLOperation):
     name = "rul.make_referrable"
     subject: Operand = operand_def()
+    index: Attribute = attr_def(IntAttr)
 
     @classmethod
-    def make(cls, unit: SSAValue):
-        return cls.build(operands=[unit])
+    def make(cls, unit: SSAValue, index: int):
+        return cls.build(operands=[unit], attributes={"index": IntAttr(index)})
 
     assembly_format = "$subject attr-dict `:` type($subject) "
 
@@ -504,6 +509,18 @@ class IsSame(IRDLOperation):
     @classmethod
     def make(cls, lhs: SSAValue, rhs: SSAValue):
         return cls.build(result_types=[BoolType()], operands=[lhs, rhs])
+
+@irdl_op_definition
+class ThisAbility(IRDLOperation):
+    name = "rul.this_ability"
+    result: OpResult = result_def(AbilityType)
+    traits: OpTraits = traits_def(Pure())
+
+    assembly_format = " attr-dict `->` type($result)"
+
+    @classmethod
+    def make(cls):
+        return cls.build(result_types=[AbilityType()])
 
 
 @irdl_op_definition
@@ -592,58 +609,6 @@ class SubjectsIn(IRDLOperation):
         return cls.build(result_types=[ListType.make(ModelType())], operands=[unit])
 
 @irdl_op_definition
-class Destroys(IRDLOperation, FilteringOp):
-    name = "rul.destroys"
-    source: Region = region_def()
-    target: Region = region_def()
-    effect: Region = region_def()
-    traits: OpTraits = traits_def(FilteringInterface())
-
-    assembly_format = "`source` $source `target` $target `effect` $effect attr-dict"
-
-    @classmethod
-    def make(cls):
-        op = cls.build(regions=[Region(Block()), Region(Block()), Region(Block())])
-        op.source.first_block.insert_arg(ModelType(), 0)
-        op.target.first_block.insert_arg(ModelType(), 0)
-        op.effect.first_block.insert_arg(ModelType(), 0)
-        op.effect.first_block.insert_arg(ModelType(), 1)
-        return op
-
-
-@irdl_op_definition
-class MakesAnAttack(IRDLOperation, FilteringOp):
-    name = "rul.makes_an_attack"
-    condition: Region = region_def()
-    effect: Region = region_def()
-    traits: OpTraits = traits_def(FilteringInterface())
-
-    assembly_format = "`condition` $condition `effect` $effect attr-dict"
-
-    @classmethod
-    def make(cls):
-        op = cls.build(regions=[Region(Block()), Region(Block())])
-        op.condition.first_block.insert_arg(ModelType(), 0)
-        op.condition.first_block.insert_arg(UnitType(), 1)
-        op.condition.first_block.insert_arg(AttackType(), 2)
-        op.effect.first_block.insert_arg(ModelType(), 0)
-        op.effect.first_block.insert_arg(UnitType(), 1)
-        op.effect.first_block.insert_arg(AttackType(), 2)
-        return op
-
-@irdl_op_definition
-class ThatIsTargeting(IRDLOperation):
-    name = "rul.that_is_targeting"
-    event: Operand = operand_def(BaseAttr(TargetingTypeInterface))
-    target: Operand = operand_def(BaseAttr(TargetableTypeInterface))
-    result: OpResult = result_def(BoolType)
-    traits: OpTraits = traits_def(Pure())
-
-    @classmethod
-    def make(cls, event: SSAValue, target: SSAValue):
-        return cls.build(result_types=[BoolType()], operands=[source, target])
-
-@irdl_op_definition
 class AddUnitToArmy(IRDLOperation):
     name = "rul.add_unit_to_army"
 
@@ -651,15 +616,33 @@ class AddUnitToArmy(IRDLOperation):
 class Yield(IRDLOperation):
     name = "rul.yield"
     traits: OpTraits = traits_def(IsTerminator())
-    value: Operand = opt_operand_def()
+    value: Operand = var_operand_def()
 
     assembly_format = "($value^ `:` type($value))?  attr-dict "
 
+    def get_single_result():
+        return self.value[0]
+
     @classmethod
-    def make(cls, value: SSAValue = None):
-        if value == None:
-            return cls.build(operands=[None])
-        return cls.build(operands=[value])
+    def make(cls, *values):
+        if len(values) == 0:
+            return cls.build(operands=[[]])
+        return cls.build(operands=[val for val in values])
+
+@irdl_op_definition
+class IfItDoes(IRDLOperation):
+    name = "rul.if_it_does"
+    condition = region_def()
+    effect = region_def()
+
+    traits: OpTraits = traits_def(HasPreconditions())
+
+    assembly_format = "`condition` $condition `effect` $effect attr-dict "
+
+    @classmethod
+    def make(cls) -> 'ConditionalEffect':
+        to_return = cls.build(regions=[Region(Block()),Region(Block())])
+        return to_return
 
 @irdl_op_definition
 class ConditionalEffect(IRDLOperation):
@@ -677,21 +660,6 @@ class ConditionalEffect(IRDLOperation):
         return to_return
 
 
-@irdl_op_definition
-class TargetedWith(IRDLOperation):
-    name = "rul.on_being_targeted"
-    target = region_def()
-    targeting_event = region_def()
-    target_result: OpResult = result_def(BaseAttr(TargetableTypeInterface))
-    targeting_result : OpResult = result_def(BaseAttr(TargetingTypeInterface))
-    event_result: OpResult = result_def(BaseAttr(EventTypeInterface))
-
-    @classmethod
-    def make(cls):
-        to_return = cls.build(result_types=[UnknownType(), UnknownType(), UnknownType()], regions=[Region(),Region()])
-        to_return.targeting_event.add_block(Block())
-        to_return.target.add_block(Block())
-        return to_return
 
 @irdl_op_definition
 class ItSubject(IRDLOperation):
@@ -716,6 +684,19 @@ class MakeBattleShockTest(IRDLOperation):
     def make(cls, unit: SSAValue):
         return cls.build(operands=[unit])
 
+
+@irdl_op_definition
+class OncePer(IRDLOperation):
+    name = "rul.once_per"
+    body: Region = region_def()
+    value: UseLimitAttr = attr_def(UseLimitAttr)
+    traits: OpTraits = traits_def(RecursivelySpeculatable(), NoTerminator())
+
+    assembly_format = "$body $value attr-dict"
+
+    @classmethod
+    def make(cls, value: UseLimit):
+        return cls.build(attributes={"value": UseLimitAttr(value)}, regions=[Region(Block())])
 
 @irdl_op_definition
 class BattleShocked(IRDLOperation):
@@ -779,7 +760,7 @@ class CapturedReference(IRDLOperation):
     assembly_format = "$value attr-dict `:` type($value) `->` type($result)"
 
     @classmethod
-    def make(cls, operand: SSAValue):
+    def make(cls, operand: SSAValue) -> 'CapturedReference':
         return cls.build(result_types=[operand.type], operands=[operand])
 
 @irdl_op_definition
@@ -792,7 +773,7 @@ class ConstrainedSuchSubject(IRDLOperation):
 
     @classmethod
     def make(cls) -> 'ConstrainedSuchSubject':
-        to_return = cls.build(result_types=[type], regions=[Region(Block())])
+        to_return = cls.build(result_types=[UnknownType()], regions=[Region(Block())])
         return to_return
 
 @irdl_op_definition
@@ -834,7 +815,7 @@ class OneOf(IRDLOperation):
 
     base_subject: Region = region_def()
     result: OpResult = result_def()
-    traits: OpTraits = traits_def(RecursivelySpeculatable())
+    traits: OpTraits = traits_def(Pure())
 
     assembly_format = "$base_subject attr-dict `->` type($result)"
 
@@ -852,17 +833,23 @@ class FilterList(IRDLOperation):
     result: OpResult = result_def()
     traits: OpTraits = traits_def(RecursivelySpeculatable())
 
+    def get_yielded_base_subject(self):
+        return self.base_subject.first_block.last_op.value[0]
+
+    def get_yielded_constraint(self):
+        return self.constraint.first_block.last_op.value[0]
+
     assembly_format = "$base_subject $constraint attr-dict `->` type($result)"
 
     def single_base_subject(self):
         if len(self.base_subject.first_block.ops) == 2:
-            self.base_subject.first_block.last_op.value.owner == self.base_subject.first_block.first_op
+            self.get_yielded_base_subject().owner == self.base_subject.first_block.first_op
             return self.base_subject.first_block.first_op
         return None
 
     def single_constraint(self):
         if len(self.base_subject.first_block.ops) == 2:
-            self.constraint.first_block.last_op.value.owner == self.constraint.first_block.first_op
+            self.get_yielded_base_subject().owner == self.constraint.first_block.first_op
             return self.constraint.first_block.first_op
         return None
 
@@ -903,74 +890,29 @@ class RLCFunction(IRDLOperation):
     body: Region = region_def()
     traits: OpTraits = traits_def(NoTerminator())
 
-    def get_this_model(self):
-        return self.body.first_block.args[1]
-
-    def get_attack_source(self):
-        return self.body.first_block.args[2]
-
-    def get_attack_target(self):
-        return self.body.first_block.args[3]
-
-    def get_attack_attack(self):
-        return self.body.first_block.args[4]
-
     assembly_format = "$sym_name $body attr-dict "
 
+    def get_arg(self, arg_name):
+        for arg in self.body.first_block.args:
+            if arg.name_hint == arg_name:
+                return arg
+        return None
+
     @classmethod
-    def make_time_event(cls, name: str) -> 'RLCFunction':
-        op = cls.build(regions=[Region(Block())], attributes={"sym_name": StringAttr(name)})
-        op.body.first_block.insert_arg(UnitType(), 0) # this_unit
-        op.body.first_block.args[0].name_hint = "this_unit"
-        op.body.first_block.insert_arg(ModelType(), 1) # this_model
-        op.body.first_block.args[1].name_hint = "this_model"
+    def make(cls, original: 'MappableOntoFunction') -> 'RLCFunction':
+        op = cls.build(regions=[Region(Block())], attributes={"sym_name": StringAttr(original.get_fun_name())})
+        i = 0
+        for name, type in zip(original.get_fun_arg_names(), original.get_fun_arg_types()):
+            op.body.first_block.insert_arg(type, i)
+            op.body.first_block.args[i].name_hint = name
+            i = i + 1
         return op
 
 
-    @classmethod
-    def make_event(cls, name: str) -> 'RLCFunction':
-        op = cls.build(regions=[Region(Block())], attributes={"sym_name": StringAttr(name)})
-        op.body.first_block.insert_arg(UnitType(), 0) # this_unit
-        op.body.first_block.args[0].name_hint = "this_unit"
-        op.body.first_block.insert_arg(ModelType(), 1) # this_model
-        op.body.first_block.args[1].name_hint = "this_model"
-        op.body.first_block.insert_arg(UnitType(), 2) # unit_being_evaluated
-        op.body.first_block.args[2].name_hint = "evaluated_unit"
-        op.body.first_block.insert_arg(ModelType(), 3) # model_being_evaluated
-        op.body.first_block.args[3].name_hint = "evaluated_model"
-        return op
-
-    @classmethod
-    def make_attack_event(cls, name: str) -> 'RLCFunction':
-        op = cls.build(regions=[Region(Block())], attributes={"sym_name": StringAttr(name)})
-        op.body.first_block.insert_arg(UnitType(), 0)
-        op.body.first_block.args[0].name_hint = "this_unit"
-        op.body.first_block.insert_arg(ModelType(), 1)
-        op.body.first_block.args[1].name_hint = "this_model"
-        op.body.first_block.insert_arg(ModelType(), 2)
-        op.body.first_block.args[2].name_hint = "source_model"
-        op.body.first_block.insert_arg(UnitType(), 3)
-        op.body.first_block.args[3].name_hint = "target_unit"
-        op.body.first_block.insert_arg(AttackType(), 4)
-        op.body.first_block.args[4].name_hint = "attack"
-        return op
-
-    @classmethod
-    def make_destroys_event(cls, name: str) -> 'RLCFunction':
-        op = cls.build(regions=[Region(Block())], attributes={"sym_name": StringAttr(name)})
-        op.body.first_block.insert_arg(UnitType(), 0)
-        op.body.first_block.args[0].name_hint = "this_unit"
-        op.body.first_block.insert_arg(ModelType(), 1)
-        op.body.first_block.args[1].name_hint = "this_model"
-        op.body.first_block.insert_arg(ModelType(), 2)
-        op.body.first_block.args[2].name_hint = "source_model"
-        op.body.first_block.insert_arg(UnitType(), 3)
-        op.body.first_block.args[3].name_hint = "target_unit"
-        return op
 
 @irdl_op_definition
 class AdditionalEffect(IRDLOperation):
-    name = "rul.additiona_effect"
+    name = "rul.additional_effect"
     body: Region = region_def()
     traits: OpTraits = traits_def(RecursivelySpeculatable())
 
@@ -1010,6 +952,19 @@ class IfStatement(IRDLOperation):
         return cls.build(regions=[Region(Block()), Region(Block())])
 
 @irdl_op_definition
+class GiveInvulterability(IRDLOperation):
+    name = "rul.give_invulnerability"
+    beneficient: Operand = operand_def(ModelType)
+    value: IntAttr = attr_def(IntAttr)
+
+    assembly_format = "$value $beneficient `:` type($beneficient) attr-dict "
+
+    @classmethod
+    def make(cls, value, beneficient) -> 'GiveInvulterability':
+        return cls.build(operands=[beneficient], attributes={"value": value})
+
+
+@irdl_op_definition
 class GiveWeaponAbility(IRDLOperation):
     name = "rul.assign_weapon_ability"
     beneficient: Operand = operand_def(ModelType)
@@ -1022,31 +977,8 @@ class GiveWeaponAbility(IRDLOperation):
     def make(cls, model: SSAValue, ability: WeaponAbilityKindAttr, qualifier: WeaponQualifierKindAttr) -> 'GiveWeaponAbility':
         return cls.build(operands=[model], attributes={"ability": ability, "qualifier": qualifier})
 
-@irdl_op_definition
-class ObtainWeaponAbility(IRDLOperation):
-    name = "rul.obtain_weapon_ability"
-    condition: Region = region_def()
-    beneficient: Region = region_def()
-    ability: Attribute = attr_def(WeaponAbilityAttr)
-    qualifier: Attribute = attr_def(WeaponQualifierKindAttr)
-    traits: OpTraits = traits_def(HasPreconditions())
-
-    assembly_format = "`condition` $condition `beneficient` $beneficient `ability` $ability `qualifier` $qualifier attr-dict "
-
-    @classmethod
-    def make(cls, ability: WeaponAbilityKindAttr, qualifier: WeaponQualifierKindAttr) -> 'ObtainWeaponAbility':
-        return cls.build(regions=[Region(Block()), Region(Block())], attributes={"ability": WeaponAbilityAttr.make(ability, 0), "qualifier": qualifier})
 
 
-@irdl_op_definition
-class ObtainInvulnerableSave(IRDLOperation):
-    name = "rul.obtain_cover"
-    beneficient: Operand = operand_def(AnyOf([UnitType, ModelType]))
-    value: Attribute =  attr_def(IntAttr)
-
-    @classmethod
-    def make(cls, beneficient: SSAValue, value: int):
-        return cls.build(operands=[beneficient], attributes={"value": IntAttr(value)})
 
 @irdl_op_definition
 class OnTheBattleField(IRDLOperation):
@@ -1094,11 +1026,13 @@ class FellBack(IRDLOperation):
 
 @irdl_op_definition
 class HasAbility(IRDLOperation):
-    name = "rul.with_ability"
+    name = "rul.has_ability"
     subject: Operand = operand_def(AnyOf([UnitType, ModelType]))
     ability: Operand = operand_def(AbilityType)
     result: OpResult = result_def(BoolType)
     traits: OpTraits = traits_def(Pure())
+
+    assembly_format = "$subject $ability `:` type($subject) `,` type($ability) attr-dict `->` type($result)"
 
     @classmethod
     def make(cls, subject: SSAValue, ability: SSAValue):
@@ -1113,9 +1047,155 @@ class Setup(IRDLOperation):
     def make(cls, subject: SSAValue):
         return cls.build(operands=[subject])
 
+## EVENTS
+
+# a construct that to be computable will need to become the top level entity that will contain everything else.
+class MappableOntoFunction:
+    condition = region_def()
+    effect = region_def()
+    traits: OpTraits = traits_def(HasPreconditions())
+
+    def get_fun_name(self):
+        raise NotImplementedError()
+
+    def get_fun_arg_types(self):
+        return [ModelType(), UnitType(), ModelType(), UnitType()]
+
+    def get_fun_arg_names(self):
+        return ["self_model", "self_unit", "evaluated_model", "evaluated_unit"]
+
+@irdl_op_definition
+class ModifyCharacteristic(IRDLOperation, MappableOntoFunction):
+    name = "rul.modify_characteristic"
+    characteristic: Attribute = attr_def(CharacteristicAttr)
+    quantity: Attribute = attr_def(IntAttr)
+    beneficient = region_def()
+
+    def get_fun_name(self):
+        return "evaluate_" + self.characteristic.data
+
+    assembly_format = "$characteristic $quantity $condition $beneficient $effect attr-dict"
+
+    @classmethod
+    def make(cls, characteristic: Characteristic, quantity: int) -> 'ModifyRoll':
+        to_return = cls.build(attributes={"characteristic": CharacteristicAttr(characteristic), 'quantity': IntAttr(quantity)}, regions=[Region(Block()), Region(Block()), Region(Block())])
+        return to_return
+
+@irdl_op_definition
+class ObtainInvulnerableSave(IRDLOperation, MappableOntoFunction):
+    name = "rul.obtains_invulnerable_save"
+    beneficient: Region = region_def()
+    value: Attribute =  attr_def(IntAttr)
+
+    assembly_format = "$value `condition` $condition `beneficient` $beneficient `effect` $effect attr-dict"
+
+    def get_fun_name(self):
+        return "evaluate_invulnerability_save"
+
+    @classmethod
+    def make(cls, value: int):
+        return cls.build(regions=[Region(Block()), Region(Block()), Region(Block())], attributes={"value": IntAttr(value)})
+
+@irdl_op_definition
+class ObtainWeaponAbility(IRDLOperation, MappableOntoFunction):
+    name = "rul.obtain_weapon_ability"
+    beneficient: Region = region_def()
+    ability: Attribute = attr_def(WeaponAbilityAttr)
+    qualifier: Attribute = attr_def(WeaponQualifierKindAttr)
+
+    def get_fun_name(self):
+        return "evaluate_weapon_abilities"
+
+    assembly_format = "`condition` $condition `beneficient` $beneficient `ability` $ability `qualifier` $qualifier $effect attr-dict "
+
+    @classmethod
+    def make(cls, ability: WeaponAbilityKindAttr, qualifier: WeaponQualifierKindAttr) -> 'ObtainWeaponAbility':
+        return cls.build(regions=[Region(Block()), Region(Block()), Region(Block())], attributes={"ability": WeaponAbilityAttr.make(ability, 0), "qualifier": qualifier})
+
+@irdl_op_definition
+class TimedEffect(IRDLOperation, MappableOntoFunction):
+    name = "rul.timed_effect"
+    event: Attribute = attr_def(TimeEventType)
+
+    assembly_format = "`event` $event `condition` $condition  `effect` $effect attr-dict "
+
+    def get_fun_name(self) -> str:
+        return self.event.event_name()
+
+    @classmethod
+    def make(cls, event: TimeEventType, reversed_declaration=False) -> 'TimedEffect':
+        to_return = cls.build(regions=[Region(Block()),Region(Block())], attributes={"event": event})
+        return to_return
+
+@irdl_op_definition
+class Destroys(IRDLOperation, MappableOntoFunction):
+    name = "rul.destroys"
+    source: Region = region_def()
+    target: Region = region_def()
+
+    def get_fun_name(self):
+        return "on_destruction"
+
+    def get_fun_arg_types(self):
+        return [ModelType(), UnitType(), ModelType(), UnitType(), ModelType(), UnitType()]
+
+    def get_fun_arg_names(self):
+        return ["self_model", "self_unit", "source_model", "source_unit", "target_model", "target_unit"]
+
+    assembly_format = "`source` $source `target` $target  `condition` $condition `effect` $effect attr-dict"
+
+    @classmethod
+    def make(cls):
+        op = cls.build(regions=[Region(Block()), Region(Block()), Region(Block()), Region(Block())])
+        return op
+
+
+@irdl_op_definition
+class MakesAnAttack(IRDLOperation, MappableOntoFunction):
+    name = "rul.makes_an_attack"
+    subject: Region = region_def()
+
+    assembly_format = "`subject` $subject `condition` $condition `effect` $effect attr-dict"
+
+    def get_fun_name(self):
+        return "on_attack"
+
+    def get_fun_arg_types(self):
+        return [ModelType(), UnitType(), ModelType(), UnitType(), ModelType(), UnitType(), AttackType()]
+
+    def get_fun_arg_names(self):
+        return ["self_model", "self_unit", "source_model", "source_unit", "target_model", "target_unit", "attack"]
+
+
+    @classmethod
+    def make(cls):
+        op = cls.build(regions=[Region(Block()), Region(Block()), Region(Block())])
+        return op
+
+@irdl_op_definition
+class Targets(IRDLOperation, MappableOntoFunction):
+    name = "rul.targets"
+    subjects: Region = region_def()
+    traits: OpTraits = traits_def(Pure())
+    assembly_format = "`subjects` $subjects `condition` $condition `effect` $effect attr-dict"
+
+    def get_fun_name(self):
+        return "on_targeting"
+
+    def get_fun_arg_types(self):
+        return [ModelType(), UnitType(), ModelType(), UnitType(), ModelType(), UnitType()]
+
+    def get_fun_arg_names(self):
+        return ["self_model", "self_unit", "source_model", "source_unit", "target_model", "target_unit"]
+
+    @classmethod
+    def make(cls):
+        return cls.build(regions=[Region(Block()), Region(Block()), Region(Block())])
+
+
 class RulDialect(Dialect):
     def __init__(self):
-        super().__init__(operations=[SelectSubject, EachTimeEffect,BelongsTo, TimedEffect, UntilEffect, IfStatement, RLCFunction, All, ConditionalEffect, TrueOp,HasKeyword, And, IsOwnedBy, ThisSubject, FilterList, IsAttackMadeWeapon, Ability, MovementKindAttr, WeaponQualifierKindAttr, KeywordAttr, CharacteristicAttr, WeaponCharacteristicAttr, WeaponAbilityKindAttr, WeaponAbilityAttr, ObtainWeaponAbility, TimeQualifierAttr, PlayerAttr, BelowHalfStrenght, BelowStartingStrenght, AddUnitToArmy, TargetedWith, BattleShocked, UsingAbilitySubject, Leading, LeadedUnit, DestroyedSubject, ObtainCover, ObtainInvulnerableSave, OnTheBattleField, FellBack, SubjectsIn, SuchSubject], attributes=[ModelType, BoolType, AbilityKindAttr, AbilityType, UnitType, StratagemUseType, AbilityUseType, UnknownType, StratagemType, IntegerRangeAttr, DiceExpression, TimeInstantAttr, TimeEventType])
+        super().__init__(operations=[SelectSubject, EachTimeEffect,BelongsTo, TimedEffect, UntilEffect, IfStatement, RLCFunction, All, ConditionalEffect, TrueOp,HasKeyword, And, IsOwnedBy, ThisSubject, FilterList, IsAttackMadeWeapon, Ability, MovementKindAttr, WeaponQualifierKindAttr, KeywordAttr, CharacteristicAttr, WeaponCharacteristicAttr, WeaponAbilityKindAttr, WeaponAbilityAttr, ObtainWeaponAbility, TimeQualifierAttr, PlayerAttr, BelowHalfStrenght, BelowStartingStrenght, AddUnitToArmy, BattleShocked, UsingAbilitySubject, Leading, LeadedUnit, DestroyedSubject, ObtainCover, ObtainInvulnerableSave, OnTheBattleField, FellBack, SubjectsIn, SuchSubject], attributes=[ModelType, BoolType, AbilityKindAttr, AbilityType, UnitType, StratagemUseType, AbilityUseType, UnknownType, StratagemType, IntegerRangeAttr, DiceExpression, TimeInstantAttr, TimeEventType])
 
 
 if __name__ == "__main__":
@@ -1127,7 +1207,6 @@ if __name__ == "__main__":
 
     result = builder.insert(Ability.make(AbilityKind.DEEP_STRIKE))
     builder.insert(IsAttackMadeWeapon.make(result, "some_weapon"))
-    builder.insert(TargetedWith.make())
     printer = Printer()
     printer.print_op(module)
     range = IntegerRangeAttr.make(0, 10)

@@ -60,7 +60,8 @@ class RLCSerializer(ModulePass):
 
     @visit_expression.register
     def _(self, node: Yield):
-        self.visit_expression(node.value)
+        assert(len(node.value) == 1)
+        self.visit_expression(node.value[0])
 
     @singledispatchmethod
     def visit(self, node):
@@ -188,9 +189,30 @@ class RLCSerializer(ModulePass):
 
     @visit.register
     def _(self, cond: Yield):
-        if cond.value is None:
+        if len(cond.value) == 0:
             return
-        self.write_var(cond.value)
+        assert len(cond.value) == 2
+        self.write_var(cond.value[0])
+
+    @visit.register
+    def _(self, cond: ThisAbility):
+        self.declare_var(cond.result)
+        self.print(f" = ")
+        self.println("unique_id")
+
+    @visit.register
+    def _(self, cond: OptionallyUse):
+        assert(cond.user.type == ModelType())
+        self.print("if self_model == ")
+        self.write_var(cond.user)
+        self.println(":")
+        self.indentation_level = self.indentation_level + 1
+        self.println("act use_it(Bool do_it)")
+        self.println("if do_it:")
+        self.indentation_level = self.indentation_level + 1
+        for op in list(cond.effect.ops)[:-1]:
+            self.visit(op)
+        self.indentation_level = self.indentation_level - 2
 
     @visit.register
     def _(self, cond: WeaponAbilityAttr):
@@ -206,12 +228,15 @@ class RLCSerializer(ModulePass):
 
     def write_type(self, type):
         if isinstance(type, ModelType):
-            self.print("Model")
+            return
         elif isinstance(type, UnitType):
             self.print("Unit")
+            return
         elif isinstance(type, AttackType):
             self.print("Attack")
+            return
         else:
+            print(type)
             raise NotImplementedError()
 
     def print_args(self, args):
@@ -230,6 +255,14 @@ class RLCSerializer(ModulePass):
         self.visit(cond.characteristic)
         self.print(", ")
         self.visit(cond.quantity)
+        self.println(")")
+
+    @visit.register
+    def _(self, cond: GiveInvulterability):
+        self.print("add_invulnerability(")
+        self.write_var(cond.beneficient)
+        self.print(", ")
+        self.visit(cond.value)
         self.println(")")
 
 
@@ -261,7 +294,7 @@ class RLCSerializer(ModulePass):
         for op in list(cond.condition.ops)[:-1]:
             self.visit(op)
         self.print("if ")
-        self.write_var(cond.condition.first_block.last_op.value)
+        self.write_var(cond.condition.first_block.last_op.value[0])
         self.println(":")
         self.indentation_level = self.indentation_level + 1
         for op in list(cond.true_branch.ops)[:-1]:
@@ -341,7 +374,7 @@ class RLCSerializer(ModulePass):
         for op in list(cond.condition.ops)[:-1]:
             self.visit(op)
         self.print("if ")
-        self.write_var(cond.condition.first_block.last_op.value)
+        self.write_var(cond.condition.first_block.last_op.value[0])
         self.println(":")
         self.indentation_level = self.indentation_level + 1
         for op in list(cond.effect.ops):
@@ -414,16 +447,16 @@ class RLCSerializer(ModulePass):
         self.print("for ")
         self.declare_var(cond.constraint.first_block.args[0])
         self.print(" in ")
-        self.write_var(cond.base_subject.first_block.last_op.value)
+        self.write_var(cond.base_subject.first_block.last_op.value[0])
         self.println(":")
         self.indentation_level = self.indentation_level + 1
         self.print("if ")
-        self.visit_expression(cond.constraint.first_block.last_op.value)
+        self.visit_expression(cond.constraint.first_block.last_op.value[0])
         self.println(":")
         self.indentation_level = self.indentation_level + 1
         self.write_var(cond.result)
         self.print(".append(")
-        self.write_var(cond.base_subject.first_block.last_op.value)
+        self.write_var(cond.base_subject.first_block.last_op.value[0])
         self.println(")")
         self.indentation_level = self.indentation_level - 2
 
@@ -433,7 +466,7 @@ class RLCSerializer(ModulePass):
         for op in list(cond.condition.ops)[:-1]:
             self.visit(op)
         self.print("if ")
-        self.write_var(cond.condition.first_block.last_op.value)
+        self.write_var(cond.condition.first_block.last_op.value[0])
         self.println(":")
         self.indentation_level = self.indentation_level + 1
         for op in list(cond.effect.ops):

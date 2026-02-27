@@ -15,7 +15,9 @@ def get_arg_parser():
     ap.add_argument("--type-checked", action='store_true', default=False)
     ap.add_argument("--canonicalized", action='store_true', default=False)
     ap.add_argument("--before-printing", action='store_true', default=False)
+    ap.add_argument("--after-events", action='store_true', default=False)
     ap.add_argument("--after-inline", action='store_true', default=False)
+    ap.add_argument("--before-bounding", action='store_true', default=False)
     ap.add_argument("--verify", action='store_true', default=False)
     return ap
 
@@ -52,9 +54,15 @@ def make_pipeline(args, out):
         passes.append(PrintModulePass(out))
         return passes
     passes.append(RewriteEventsPass())
+    if args.after_events:
+        passes.append(PrintModulePass(out))
+        return passes
     passes.append(ResolveAbsoluteReferencesPass())
     passes.append(DropUselessOperations())
     passes.append(CanonicalizePass())
+    if args.before_bounding:
+        passes.append(PrintModulePass(out))
+        return passes
     passes.append(ReplaceUnboundedSubjectsWithLoops())
     if args.before_printing:
         passes.append(PrintModulePass(out))
